@@ -290,8 +290,8 @@ PROVIDER_MODELS = {
         "models": ["deepseek-chat", "deepseek-reasoner"],
         "default": "deepseek-chat",
         "help": {
-            "deepseek-chat":     "DeepSeek V3 · 速度快、费用低，日常文案推荐",
-            "deepseek-reasoner": "DeepSeek R1 · 深度推理，先「想」再输出，质量高但慢 3-5 倍、贵约 10 倍",
+            "deepseek-chat":     "V4 Flash 快速模式 · 不思考直接出，速度快费用低，日常文案推荐",
+            "deepseek-reasoner": "V4 Flash 思考模式 · 先推理再输出，返回思维链；慢 3-5 倍、贵约 10 倍",
         },
     },
     "交大内网 (SJTU)": {
@@ -305,9 +305,9 @@ PROVIDER_MODELS = {
         ],
         "default": "deepseek-chat",
         "help": {
-            "deepseek-chat":     "DeepSeek V3.2 · 与官方同款，走交大内网，免费额度大 ✅ 文案推荐",
+            "deepseek-chat":     "DeepSeek V3.2 · 与官方同款，走交大内网，免费额度大，文案推荐",
             "deepseek-reasoner": "DeepSeek R1 · 深度推理，质量高，速度慢",
-            "minimax-m2.5":      "MiniMax M2.5 · 中文口语化表达出色，适合微信文案 ✅ 推荐试用",
+            "minimax-m2.5":      "MiniMax M2.5 · 中文口语化表达出色，适合微信文案，推荐试用",
             "minimax":           "MiniMax（同 minimax-m2.5）",
             "qwen3coder":        "Qwen3Coder · 专门用于写代码，不适合文案",
             "qwen3vl":           "Qwen3VL · 图文多模态，暂时用不上",
@@ -981,7 +981,232 @@ def zip_posts(posts: list[Post]) -> bytes:
 # 8. Streamlit UI
 # ============================================================================
 
-st.set_page_config(page_title="LLM 文案生成工作流", page_icon="✍️", layout="wide")
+st.set_page_config(page_title="交大文案工作台", layout="wide")
+
+
+def _inject_design_system() -> None:
+    """Streamlit theme layer: SJTU red, restrained gold, editorial workspace surfaces."""
+    st.markdown(
+        """
+        <style>
+        :root {
+            --sjtu-red: #cc0000;
+            --sjtu-red-deep: #8f1010;
+            --sjtu-red-soft: #f7e8e8;
+            --sjtu-gold: #b38b59;
+            --ink: #241f20;
+            --muted: #6b6460;
+            --line: rgba(36, 31, 32, 0.12);
+            --surface: rgba(255, 255, 255, 0.86);
+            --paper: #fbf8f4;
+        }
+
+        .stApp {
+            background:
+                radial-gradient(circle at 84% 12%, rgba(204, 0, 0, 0.10), transparent 28rem),
+                linear-gradient(135deg, #fffaf2 0%, #fbf8f4 42%, #f6eee9 100%);
+            color: var(--ink);
+        }
+
+        .block-container {
+            max-width: 1400px;
+            padding-top: 2rem;
+            padding-bottom: 4rem;
+        }
+
+        [data-testid="stSidebar"] {
+            background: linear-gradient(180deg, #fffaf5 0%, #f4ebe5 100%);
+            border-right: 1px solid var(--line);
+        }
+
+        [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p,
+        [data-testid="stSidebar"] label,
+        [data-testid="stSidebar"] .stCaptionContainer {
+            color: var(--muted);
+        }
+
+        h1, h2, h3, [data-testid="stMarkdownContainer"] h1,
+        [data-testid="stMarkdownContainer"] h2,
+        [data-testid="stMarkdownContainer"] h3 {
+            letter-spacing: 0;
+            color: var(--ink);
+        }
+
+        div[data-testid="stTabs"] button {
+            border-radius: 999px;
+            color: var(--muted);
+            transition: transform 180ms cubic-bezier(.16, 1, .3, 1),
+                        background 180ms cubic-bezier(.16, 1, .3, 1);
+        }
+
+        div[data-testid="stTabs"] button[aria-selected="true"] {
+            background: var(--sjtu-red);
+            color: #fffaf7;
+        }
+
+        div[data-testid="stTabs"] button:active,
+        .stButton button:active,
+        .stDownloadButton button:active {
+            transform: translateY(1px) scale(0.99);
+        }
+
+        .stButton button,
+        .stDownloadButton button {
+            border-radius: 8px;
+            border: 1px solid rgba(204, 0, 0, 0.20);
+            background: #fffaf7;
+            color: var(--ink);
+            box-shadow: 0 14px 32px -24px rgba(143, 16, 16, 0.55);
+            transition: transform 180ms cubic-bezier(.16, 1, .3, 1),
+                        border-color 180ms cubic-bezier(.16, 1, .3, 1),
+                        background 180ms cubic-bezier(.16, 1, .3, 1);
+        }
+
+        .stButton button:hover,
+        .stDownloadButton button:hover {
+            border-color: rgba(204, 0, 0, 0.45);
+            background: #fff4ed;
+            color: var(--sjtu-red-deep);
+        }
+
+        .stButton button[kind="primary"],
+        .stDownloadButton button[kind="primary"] {
+            background: var(--sjtu-red);
+            color: #fffaf7;
+            border-color: var(--sjtu-red);
+        }
+
+        [data-testid="stMetric"] {
+            padding: 1rem 0;
+            border-top: 1px solid var(--line);
+            border-bottom: 1px solid var(--line);
+            background: transparent;
+        }
+
+        [data-testid="stExpander"] {
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            background: rgba(255, 255, 255, 0.72);
+            box-shadow: 0 20px 48px -38px rgba(36, 31, 32, 0.30);
+        }
+
+        textarea, input, [data-baseweb="select"] > div {
+            border-radius: 8px !important;
+        }
+
+        .sjtu-hero {
+            position: relative;
+            min-height: 340px;
+            padding: clamp(2rem, 6vw, 5.5rem) clamp(1.25rem, 4vw, 4rem);
+            margin-bottom: 1.5rem;
+            overflow: hidden;
+            border: 1px solid rgba(204, 0, 0, 0.14);
+            border-radius: 8px;
+            background:
+                linear-gradient(116deg, rgba(255, 250, 247, 0.96) 0%, rgba(255, 250, 247, 0.88) 46%, rgba(204, 0, 0, 0.10) 100%),
+                repeating-linear-gradient(90deg, rgba(204, 0, 0, 0.08) 0 1px, transparent 1px 76px);
+            box-shadow:
+                inset 0 1px 0 rgba(255, 255, 255, 0.74),
+                0 30px 80px -58px rgba(143, 16, 16, 0.64);
+        }
+
+        .sjtu-hero:after {
+            content: "";
+            position: absolute;
+            right: -7rem;
+            top: -9rem;
+            width: 28rem;
+            height: 28rem;
+            border: 1px solid rgba(204, 0, 0, 0.22);
+            transform: rotate(18deg);
+        }
+
+        .sjtu-kicker {
+            width: fit-content;
+            padding: 0.42rem 0.68rem;
+            border: 1px solid rgba(204, 0, 0, 0.20);
+            border-radius: 999px;
+            color: var(--sjtu-red-deep);
+            background: rgba(255, 255, 255, 0.62);
+            font-size: 0.78rem;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+        }
+
+        .sjtu-hero h1 {
+            max-width: 760px;
+            margin: 1.15rem 0 1rem;
+            font-size: clamp(2.4rem, 7vw, 5.8rem);
+            line-height: 0.96;
+            font-weight: 760;
+            color: var(--ink);
+        }
+
+        .sjtu-hero p {
+            max-width: 640px;
+            margin: 0;
+            color: var(--muted);
+            font-size: 1.05rem;
+            line-height: 1.75;
+        }
+
+        .sjtu-ribbon {
+            display: grid;
+            grid-template-columns: 1.6fr 1fr 1fr;
+            gap: 1px;
+            margin: -2.2rem clamp(1rem, 4vw, 4rem) 2rem auto;
+            max-width: 760px;
+            position: relative;
+        }
+
+        .sjtu-ribbon > div {
+            padding: 1rem 1.1rem;
+            background: rgba(255, 255, 255, 0.82);
+            border: 1px solid rgba(36, 31, 32, 0.08);
+            backdrop-filter: blur(16px);
+            box-shadow: inset 0 1px 0 rgba(255,255,255,0.64);
+        }
+
+        .sjtu-ribbon strong {
+            display: block;
+            color: var(--ink);
+            font-size: 1.15rem;
+        }
+
+        .sjtu-ribbon span {
+            color: var(--muted);
+            font-size: 0.82rem;
+        }
+
+        .sjtu-section-label {
+            margin: 1rem 0 0.25rem;
+            color: var(--sjtu-red-deep);
+            font-size: 0.82rem;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+        }
+
+        .sjtu-empty {
+            padding: 2rem;
+            border: 1px dashed rgba(204, 0, 0, 0.30);
+            border-radius: 8px;
+            background: rgba(255, 250, 247, 0.70);
+            color: var(--muted);
+        }
+
+        @media (max-width: 767px) {
+            .block-container { padding-inline: 1rem; }
+            .sjtu-hero { min-height: auto; padding: 2rem 1.25rem; }
+            .sjtu-ribbon {
+                grid-template-columns: 1fr;
+                margin: 0 0 1.25rem;
+                max-width: none;
+            }
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def _get_secret(name: str, default: str = "") -> str:
@@ -1002,7 +1227,7 @@ def _check_app_password() -> bool:
         return True  # 没配密码 → 完全开放
     if st.session_state.get("_authed"):
         return True
-    st.title("🔒 访问受限")
+    st.title("访问受限")
     st.caption("此应用受密码保护，请输入访问密码。")
     pw = st.text_input("访问密码", type="password", key="_pw_input")
     if pw:
@@ -1018,12 +1243,31 @@ if not _check_app_password():
     st.stop()
 
 
-st.title("✍️ 中→英 社交文案生成工作流")
-st.caption("一站式：抓取 / 提取双语关键信息 / 按平台批量生成")
+_inject_design_system()
+
+st.markdown(
+    """
+    <section class="sjtu-hero">
+        <div class="sjtu-kicker">SJTU Copy Workflow</div>
+        <h1>交大国际传播文案工作台</h1>
+        <p>
+            把校内新闻、微信公众号与活动素材整理成双语要点，再按 Instagram、X、
+            LinkedIn、Facebook 与微信语境生成可编辑文案。界面沿用交大红为主色，
+            让编辑流程更沉稳、清楚、可复核。
+        </p>
+    </section>
+    <div class="sjtu-ribbon">
+        <div><strong>抓取到生成</strong><span>URL、文本、文件三种入口</span></div>
+        <div><strong>双语抽取</strong><span>标题、受众、关键句</span></div>
+        <div><strong>质量审稿</strong><span>评分、反馈、自动修订</span></div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
 # ---------- Sidebar ----------
 with st.sidebar:
-    st.header("⚙️ 配置")
+    st.header("工作配置")
 
     # ── 提供商选择 ──
     provider = st.radio(
@@ -1050,7 +1294,7 @@ with st.sidebar:
     if server_key:
         # 服务端已配置 → 完全隐藏输入框，访客拿不到也改不了
         api_key = server_key
-        st.success(f"✅ {key_label} 已由服务端配置加载")
+        st.success(f"{key_label} 已由服务端配置加载")
     else:
         api_key = st.text_input(
             key_label,
@@ -1062,7 +1306,7 @@ with st.sidebar:
             ),
         )
         if provider == "交大内网 (SJTU)" and not api_key:
-            st.info("💡 领取地址：https://my.sjtu.edu.cn/ → APP → API")
+            st.info("领取地址：https://my.sjtu.edu.cn/ → APP → API")
 
     # ── 模型选择 ──
     model_list = prov_cfg["models"]
@@ -1076,8 +1320,9 @@ with st.sidebar:
         help=model_help,
     )
     st.caption(
-        "⚠️ DeepSeek 的 model 名是 **alias**：`deepseek-chat` 后端实际跑 V4 Flash，"
-        "`deepseek-reasoner` 实际跑 R1 思维链版。处理完毕后结果区会显示真实模型名。"
+        "💡 DeepSeek V4 是**混合模型**：`deepseek-chat` 和 `deepseek-reasoner` 用同一个 base "
+        "(`deepseek-v4-flash`)，差别在 alias 控制要不要打开 thinking mode。结果区显示 "
+        "🧠 = thinking ON，💨 = fast，可据此判断 reasoner 是否真的生效。"
     )
 
     st.divider()
@@ -1091,7 +1336,7 @@ with st.sidebar:
     temperature = st.slider("Temperature", 0.0, 1.2, 0.7, 0.1)
     st.divider()
     enable_quality = st.checkbox(
-        "✨ 启用质量审稿（Self-Refine）",
+        "启用质量审稿（Self-Refine）",
         value=True,
         help=(
             "生成完文案后，让模型扮演主编再审一遍：评分 0-100，找出问题（事实性、平台契合度、"
@@ -1122,7 +1367,7 @@ ss.setdefault("total_tokens_out", 0)
 ss.setdefault("cache_hits", 0)
 
 # ---------- 输入区 ----------
-tab_input, tab_results, tab_logs = st.tabs(["1️⃣ 输入素材", "2️⃣ 结果", "📊 用量"])
+tab_input, tab_results, tab_logs = st.tabs(["输入素材", "结果", "用量"])
 
 with tab_input:
     col1, col2 = st.columns(2)
@@ -1131,7 +1376,7 @@ with tab_input:
         st.subheader("方式 A：粘贴文本")
         manual_name = st.text_input("文章名（用作文件夹名）", value="manual_input")
         manual_text = st.text_area("文章正文", height=240)
-        if st.button("➕ 加入队列", use_container_width=True):
+        if st.button("加入队列", use_container_width=True, key="add_manual"):
             if manual_text.strip():
                 ss.articles.append(
                     {"name": slugify(manual_name) or "manual", "text": manual_text.strip()}
@@ -1144,7 +1389,7 @@ with tab_input:
         st.subheader("方式 B：URL 抓取")
         fetch_kind = st.radio("来源类型", list(FETCHERS.keys()), horizontal=True)
         urls_raw = st.text_area("URL（每行一条）", height=120)
-        if st.button("🌐 抓取并加入队列", use_container_width=True):
+        if st.button("抓取并加入队列", use_container_width=True):
             urls = [u.strip() for u in urls_raw.splitlines() if u.strip()]
             with st.spinner(f"抓取 {len(urls)} 条…"):
                 ok, fail = 0, 0
@@ -1157,7 +1402,7 @@ with tab_input:
                         else:
                             fail += 1
                     except Exception as e:
-                        st.error(f"❌ {u}: {e}")
+                        st.error(f"{u}: {e}")
                         fail += 1
                 st.success(f"成功 {ok} / 失败 {fail}")
 
@@ -1165,29 +1410,29 @@ with tab_input:
     uploads = st.file_uploader(
         "可多选；每个文件为一篇文章", type=["txt", "md"], accept_multiple_files=True
     )
-    if uploads and st.button("📤 加入队列", use_container_width=True):
+    if uploads and st.button("加入队列", use_container_width=True, key="add_uploads"):
         for f in uploads:
             text = f.read().decode("utf-8", errors="ignore")
             ss.articles.append({"name": slugify(os.path.splitext(f.name)[0]), "text": text})
         st.success(f"已加入 {len(uploads)} 篇")
 
     st.divider()
-    st.subheader(f"📚 当前队列（{len(ss.articles)} 篇）")
+    st.subheader(f"当前队列（{len(ss.articles)} 篇）")
     if ss.articles:
         for i, art in enumerate(ss.articles):
             with st.expander(f"{i + 1}. {art['name']}（{len(art['text'])} 字）"):
                 st.caption(art.get("url", ""))
                 st.text(art["text"][:600] + ("…" if len(art["text"]) > 600 else ""))
-                if st.button("🗑 删除", key=f"del_{i}"):
+                if st.button("删除", key=f"del_{i}"):
                     ss.articles.pop(i)
                     st.rerun()
-        if st.button("🧹 清空队列"):
+        if st.button("清空队列"):
             ss.articles.clear()
             st.rerun()
 
     st.divider()
     if st.button(
-        "🚀 开始处理（提取 + 生成）",
+        "开始处理（提取 + 生成）",
         type="primary",
         use_container_width=True,
         disabled=not (api_key and ss.articles and platforms_chosen),
@@ -1264,23 +1509,27 @@ with tab_input:
         # 展示质量审稿过程中收集的错误（上一版只 print 到 stderr，用户看不到）
         q_errs = st.session_state.pop("_quality_errors", [])
         if q_errs:
-            with st.expander(f"⚠️ 质量审稿有 {len(q_errs)} 条警告（不影响正文产出）", expanded=False):
+            with st.expander(f"质量审稿有 {len(q_errs)} 条警告（不影响正文产出）", expanded=False):
                 for line in q_errs:
                     st.text(line)
-
-        st.balloons()
-
 
 # ---------- 结果区 ----------
 with tab_results:
     processed = [a for a in ss.articles if "posts" in a]
     if not processed:
-        st.info("还没有结果。请到「输入素材」加入文章并点「开始处理」。")
+        st.markdown(
+            """
+            <div class="sjtu-empty">
+                还没有生成结果。先到「输入素材」加入文章，然后运行「开始处理」。
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
     else:
         # 顶部下载全部
         all_posts = [Post(**p) for a in processed for p in a["posts"]]
         st.download_button(
-            "📦 下载全部 Markdown（zip）",
+            "下载全部 Markdown（zip）",
             data=zip_posts(all_posts),
             file_name=f"posts_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip",
             mime="application/zip",
@@ -1291,7 +1540,7 @@ with tab_results:
             ex = Extract(**art["extract"])
             posts = [Post(**p) for p in art["posts"]]
 
-            with st.expander(f"📰 {art['name']} —— {ex.title_en}", expanded=True):
+            with st.expander(f"{art['name']} —— {ex.title_en}", expanded=True):
                 with st.container():
                     c1, c2 = st.columns(2)
                     with c1:
@@ -1328,7 +1577,7 @@ with tab_results:
                             cdl, cmeta = st.columns([1, 3])
                             with cdl:
                                 st.download_button(
-                                    "⬇️ 下载 .md",
+                                    "下载 .md",
                                     data=post_to_markdown(post),
                                     file_name=f"{art['name']}_{post.platform}.md",
                                     mime="text/markdown",
@@ -1339,15 +1588,24 @@ with tab_results:
                                 if post.quality_score is not None:
                                     status = "可发布" if post.quality_publishable else "需编辑"
                                     quality_bits = f" ｜ quality {post.quality_score}/100 · {status}"
-                                # 显示模型路由：alias → 实际服务模型
-                                if post.served_model and post.served_model != post.model:
-                                    model_bits = f"{post.model} → 实际 `{post.served_model}`"
+
+                                # 用思维链的存在与否做硬指标，比看 model 名靠谱
+                                # （DeepSeek V4 把 chat/reasoner 统一到同一 base，只能用 reasoning 字段区分）
+                                if post.reasoning_content:
+                                    mode_badge = "🧠 thinking mode ON"
+                                elif "reasoner" in (post.model or "").lower():
+                                    mode_badge = "⚠️ 选了 reasoner 但未返回思维链"
                                 else:
-                                    model_bits = post.model
+                                    mode_badge = "💨 fast mode"
+
+                                served_bits = ""
+                                if post.served_model and post.served_model != post.model:
+                                    served_bits = f"（底层 `{post.served_model}`）"
+
                                 st.caption(
-                                    f"模型 {model_bits} ｜ in {post.prompt_tokens} / out "
-                                    f"{post.completion_tokens} tokens{quality_bits} ｜ "
-                                    f"{post.generated_at.isoformat(timespec='seconds')}"
+                                    f"{mode_badge} · {post.model}{served_bits} ｜ "
+                                    f"in {post.prompt_tokens} / out {post.completion_tokens} tokens"
+                                    f"{quality_bits} ｜ {post.generated_at.isoformat(timespec='seconds')}"
                                 )
                                 if post.quality_issues:
                                     with st.expander("质量反馈"):
@@ -1360,7 +1618,7 @@ with tab_results:
                                             if issue.get("suggestion"):
                                                 st.caption(issue["suggestion"])
                                 if post.reasoning_content:
-                                    with st.expander("🧠 思维链（reasoner 模型专属）"):
+                                    with st.expander("思维链（reasoner 模型专属）"):
                                         st.text(post.reasoning_content)
 
 # ---------- 用量 ----------
@@ -1375,13 +1633,13 @@ with tab_logs:
     )
     col_a, col_b = st.columns(2)
     with col_a:
-        if st.button("🧨 清空磁盘缓存", use_container_width=True):
+        if st.button("清空磁盘缓存", use_container_width=True):
             import shutil
             if os.path.exists(CACHE_DIR):
                 shutil.rmtree(CACHE_DIR)
             st.success(f"已清空 {CACHE_DIR}/")
     with col_b:
-        if st.button("🗑 清空所有结果（不删队列）", use_container_width=True):
+        if st.button("清空所有结果（不删队列）", use_container_width=True):
             # 切换模型后旧 Post 仍残留在 session_state，这个按钮把它们全部清掉
             for a in ss.articles:
                 a.pop("extract", None)
