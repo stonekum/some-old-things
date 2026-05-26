@@ -382,6 +382,10 @@ class Post(BaseModel):
     generated_at: datetime = Field(default_factory=datetime.utcnow)
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    # 后端实际服务的模型名 (deepseek-chat alias 可能跑 deepseek-v4-flash)
+    served_model: str = ""
+    # deepseek-reasoner 等推理模型返回的思维链；非推理模型为空
+    reasoning_content: str = ""
     quality_score: int | None = None
     quality_publishable: bool | None = None
     quality_needs_rewrite: bool | None = None
@@ -471,6 +475,10 @@ class LLMResponse:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     cached: bool = False
+    # API 实际服务的模型名 (例如选 deepseek-chat 可能实际跑 deepseek-v4-flash)
+    served_model: str = ""
+    # deepseek-reasoner 等推理模型会在响应里返回思维链
+    reasoning_content: str = ""
 
 
 @dataclass
@@ -492,7 +500,8 @@ def llm_chat(
     temperature: float = 0.7,
     no_cache: bool = False,
 ) -> LLMResponse:
-    key = _cache_key(system, user, model, str(json_mode), f"{temperature:.2f}")
+    # 缓存 key 加上 schema 版本号，老缓存（没 served_model 字段）会自动 miss
+    key = _cache_key(system, user, model, str(json_mode), f"{temperature:.2f}", "v2")
     if not no_cache:
         hit = _cache_get(key)
         if hit:
@@ -501,6 +510,8 @@ def llm_chat(
                 prompt_tokens=hit.get("prompt_tokens", 0),
                 completion_tokens=hit.get("completion_tokens", 0),
                 cached=True,
+                served_model=hit.get("served_model", ""),
+                reasoning_content=hit.get("reasoning_content", ""),
             )
 
     body: dict[str, Any] = {
@@ -524,12 +535,20 @@ def llm_chat(
             r = requests.post(cfg.api_url, json=body, headers=headers, timeout=cfg.timeout)
             r.raise_for_status()
             data = r.json()
-            content = data["choices"][0]["message"]["content"]
+            msg = data["choices"][0]["message"]
+            content = msg["content"]
+            # DeepSeek reasoner 系列会返回思维链
+            reasoning = msg.get("reasoning_content", "") or ""
+            # API 响应里的 model 字段告诉你后端真实跑的是哪个模型
+            # (e.g. deepseek-chat alias → deepseek-v4-flash)
+            served_model = data.get("model", model) or model
             usage = data.get("usage", {}) or {}
             out = LLMResponse(
                 content=content,
                 prompt_tokens=usage.get("prompt_tokens", 0),
                 completion_tokens=usage.get("completion_tokens", 0),
+                served_model=served_model,
+                reasoning_content=reasoning,
             )
             _cache_set(
                 key,
@@ -537,6 +556,8 @@ def llm_chat(
                     "content": out.content,
                     "prompt_tokens": out.prompt_tokens,
                     "completion_tokens": out.completion_tokens,
+                    "served_model": out.served_model,
+                    "reasoning_content": out.reasoning_content,
                 },
             )
             return out
@@ -649,6 +670,8 @@ def generate_post(
         title=payload.title,
         body=payload.body,
         model=model,
+        served_model=resp.served_model,
+        reasoning_content=resp.reasoning_content,
         prompt_tokens=resp.prompt_tokens,
         completion_tokens=resp.completion_tokens,
     )
@@ -919,7 +942,8 @@ def post_to_markdown(post: Post) -> str:
         "platform": post.platform,
         "variant": post.variant,
         "title": post.title,
-        "model": post.model,
+        "model_requested": post.model,
+        "model_served": post.served_model or post.model,
         "prompt_version": post.prompt_version,
         "generated_at": post.generated_at.isoformat(timespec="seconds"),
         "prompt_tokens": post.prompt_tokens,
@@ -1043,11 +1067,17 @@ with st.sidebar:
     # ── 模型选择 ──
     model_list = prov_cfg["models"]
     model_help = "\n\n".join(f"**{k}**：{v}" for k, v in prov_cfg["help"].items())
+    # 用 key 让 Streamlit 在 provider 切换时正确重置（避免选了 SJTU 独有模型后切回官方报错）
     model = st.selectbox(
         "模型",
         model_list,
         index=model_list.index(prov_cfg["default"]),
+        key=f"model_select_{provider}",
         help=model_help,
+    )
+    st.caption(
+        "⚠️ DeepSeek 的 model 名是 **alias**：`deepseek-chat` 后端实际跑 V4 Flash，"
+        "`deepseek-reasoner` 实际跑 R1 思维链版。处理完毕后结果区会显示真实模型名。"
     )
 
     st.divider()
@@ -1309,8 +1339,13 @@ with tab_results:
                                 if post.quality_score is not None:
                                     status = "可发布" if post.quality_publishable else "需编辑"
                                     quality_bits = f" ｜ quality {post.quality_score}/100 · {status}"
+                                # 显示模型路由：alias → 实际服务模型
+                                if post.served_model and post.served_model != post.model:
+                                    model_bits = f"{post.model} → 实际 `{post.served_model}`"
+                                else:
+                                    model_bits = post.model
                                 st.caption(
-                                    f"模型 {post.model} ｜ in {post.prompt_tokens} / out "
+                                    f"模型 {model_bits} ｜ in {post.prompt_tokens} / out "
                                     f"{post.completion_tokens} tokens{quality_bits} ｜ "
                                     f"{post.generated_at.isoformat(timespec='seconds')}"
                                 )
@@ -1324,6 +1359,9 @@ with tab_results:
                                             )
                                             if issue.get("suggestion"):
                                                 st.caption(issue["suggestion"])
+                                if post.reasoning_content:
+                                    with st.expander("🧠 思维链（reasoner 模型专属）"):
+                                        st.text(post.reasoning_content)
 
 # ---------- 用量 ----------
 with tab_logs:
@@ -1335,8 +1373,20 @@ with tab_logs:
     st.caption(
         "提示：磁盘缓存按 sha256(prompt+model+...) 命中；如要强制重新生成，去掉左侧「启用磁盘缓存」并重跑。"
     )
-    if st.button("🧨 清空磁盘缓存"):
-        import shutil
-        if os.path.exists(CACHE_DIR):
-            shutil.rmtree(CACHE_DIR)
-        st.success(f"已清空 {CACHE_DIR}/")
+    col_a, col_b = st.columns(2)
+    with col_a:
+        if st.button("🧨 清空磁盘缓存", use_container_width=True):
+            import shutil
+            if os.path.exists(CACHE_DIR):
+                shutil.rmtree(CACHE_DIR)
+            st.success(f"已清空 {CACHE_DIR}/")
+    with col_b:
+        if st.button("🗑 清空所有结果（不删队列）", use_container_width=True):
+            # 切换模型后旧 Post 仍残留在 session_state，这个按钮把它们全部清掉
+            for a in ss.articles:
+                a.pop("extract", None)
+                a.pop("posts", None)
+            ss.total_tokens_in = 0
+            ss.total_tokens_out = 0
+            st.success("已清空所有处理结果，下次点「开始处理」会全部重新生成")
+            st.rerun()
