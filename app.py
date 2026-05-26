@@ -626,7 +626,16 @@ with st.sidebar:
         type="password",
         help="不会写到磁盘；设置 DEEPSEEK_API_KEY 环境变量可自动填充",
     )
-    model = st.selectbox("Model", ["deepseek-chat", "deepseek-reasoner"], index=0)
+    model = st.selectbox(
+        "模型",
+        ["deepseek-chat", "deepseek-reasoner"],
+        index=0,
+        help=(
+            "deepseek-chat：速度快、费用低，日常文案生成推荐用这个。\n\n"
+            "deepseek-reasoner（R1）：深度推理模型，会先「思考」再输出，"
+            "逻辑更严谨，但速度慢 3-5 倍、费用高约 10 倍，适合对质量要求极高时使用。"
+        ),
+    )
     platforms_chosen = st.multiselect(
         "目标平台",
         ["instagram", "twitter", "linkedin", "facebook", "wechat"],
@@ -729,8 +738,8 @@ with tab_input:
             idx, art = idx_art
             try:
                 ex = extract_article(cfg, model, art["text"])
-                # platform 选择：用户勾选 ∩ 模型推荐；若交集为空则用用户勾选
-                chosen = [p for p in platforms_chosen if p in ex.platforms] or platforms_chosen
+                # 直接使用用户勾选的平台，不与模型推荐做交集（避免模型推荐少于用户选择时丢失平台）
+                chosen = platforms_chosen
                 posts: list[Post] = []
                 for plat in chosen:
                     for v in range(1, variants + 1):
