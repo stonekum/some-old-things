@@ -1,0 +1,31 @@
+# Default configuration. Paths are resolved relative to the package root
+# (the directory containing this file) unless absolute.
+
+paths:
+  raw: data/raw
+  extracted: data/extracted
+  cache: data/cache
+  posts: data/posts
+  logs: logs
+  history_dir: ../爬虫文/历史案例   # legacy 历史案例 folder; used to seed style
+  style_seed: data/style_seed.json
+
+models:
+  extract: deepseek-chat
+  generate: deepseek-chat
+
+generation:
+  max_workers: 4
+  variants: 1
+  default_platforms: [instagram, twitter, linkedin]
+  request_timeout_sec: 180
+  retries: 3
+  retry_backoff_sec: 8
+
+crawlers:
+  wechat:
+    links_file: ../微信链接.txt
+    user_agent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
+  sjtu_news:
+    links_file: ../校内新闻网链接.txt
+    user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"

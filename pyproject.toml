@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "copy-workflow"
+version = "0.1.0"
+description = "Chinese-to-English social media copywriting pipeline (crawl → extract → generate)"
+requires-python = ">=3.10"
+dependencies = [
+    "requests>=2.31",
+    "beautifulsoup4>=4.12",
+    "pydantic>=2.5",
+    "pydantic-settings>=2.1",
+    "python-dotenv>=1.0",
+    "PyYAML>=6.0",
+    "loguru>=0.7",
+    "striprtf>=0.0.26",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.4", "pytest-mock>=3.12"]
+streamlit = ["streamlit>=1.30"]
+
+[project.scripts]
+copy-workflow = "copy_workflow.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+copy_workflow = ["prompts/*.md"]
