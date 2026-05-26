@@ -74,3 +74,7 @@ class Post(BaseModel):
     generated_at: datetime = Field(default_factory=datetime.utcnow)
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    quality_score: int | None = None
+    quality_publishable: bool | None = None
+    quality_needs_rewrite: bool | None = None
+    quality_issues: list[dict[str, Any]] = Field(default_factory=list)

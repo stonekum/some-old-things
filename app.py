@@ -195,6 +195,88 @@ JSON：{{"title":"...","body":"..."}}。""",
     ),
 }
 
+QUALITY_REVIEW_SYSTEM = """\
+You are a senior bilingual social media editor for a university communications team.
+Review the draft against the source facts and platform norms. Output ONLY a JSON
+object. No markdown fences, no prose."""
+
+QUALITY_REVIEW_USER = """\
+Review this generated post.
+
+Score it from 0 to 100 using these criteria:
+- factuality: no invented names, programs, awards, dates, numbers, or claims.
+- platform_fit: matches the conventions and reader expectations of {platform}.
+- style_fit: professional university voice; warm, concrete, not hype-heavy.
+- clarity: clear, idiomatic, easy to understand.
+- engagement: hook, rhythm, specificity, and call-to-action fit the platform.
+- constraints: respects length, emoji, hashtag, date, and plain-text rules.
+
+Rules:
+1. Be strict about factuality. Any invented fact is a high-severity issue.
+2. Prefer concise, actionable comments over broad taste judgments.
+3. Mark publishable true only if the post can be used with minor or no edits.
+4. Set needs_rewrite true when score is below 80, publishable is false, or any high-severity issue exists.
+
+Article facts:
+{article_facts}
+
+Style reference:
+{style_seed}
+
+Draft:
+Title: {title}
+
+Body:
+{body}
+
+Return JSON:
+{{
+  "score": 0,
+  "publishable": false,
+  "needs_rewrite": true,
+  "issues": [
+    {{
+      "category": "factuality | platform_fit | style_fit | clarity | engagement | constraints | other",
+      "severity": "low | medium | high",
+      "message": "specific issue",
+      "suggestion": "specific edit direction"
+    }}
+  ],
+  "strengths": ["specific strength"]
+}}"""
+
+QUALITY_REVISE_SYSTEM = """\
+You are a senior bilingual social media editor for a university communications team.
+Revise the draft to address the review while staying strictly faithful to the
+source facts. Output ONLY a JSON object: {"title": "...", "body": "..."}."""
+
+QUALITY_REVISE_USER = """\
+Revise this {platform} post.
+
+Non-negotiable rules:
+1. Do not add names, programs, awards, partnerships, numbers, dates, places, or claims absent from the article facts.
+2. Preserve the intended platform format and reader expectations.
+3. Keep the university voice concrete, warm, and restrained.
+4. Address the review comments directly.
+5. Plain text only.
+
+Article facts:
+{article_facts}
+
+Style reference:
+{style_seed}
+
+Review comments:
+{quality_review}
+
+Original draft:
+Title: {title}
+
+Body:
+{body}
+
+Return JSON: {{"title": "...", "body": "..."}}."""
+
 DEFAULT_API_URL  = "https://api.deepseek.com/v1/chat/completions"
 SJTU_API_URL     = "https://models.sjtu.edu.cn/api/v1/chat/completions"
 PROMPT_VERSION   = "v1"
@@ -297,11 +379,47 @@ class Post(BaseModel):
     generated_at: datetime = Field(default_factory=datetime.utcnow)
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    quality_score: int | None = None
+    quality_publishable: bool | None = None
+    quality_needs_rewrite: bool | None = None
+    quality_issues: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class _PostJSON(BaseModel):
     title: str
     body: str
+
+
+class QualityIssue(BaseModel):
+    category: Literal[
+        "factuality",
+        "platform_fit",
+        "style_fit",
+        "clarity",
+        "engagement",
+        "constraints",
+        "other",
+    ]
+    severity: Literal["low", "medium", "high"]
+    message: str
+    suggestion: str = ""
+
+
+class QualityReview(BaseModel):
+    score: int = Field(ge=0, le=100)
+    publishable: bool
+    needs_rewrite: bool | None = None
+    issues: list[QualityIssue] = Field(default_factory=list)
+    strengths: list[str] = Field(default_factory=list)
+
+    @field_validator("score", mode="before")
+    @classmethod
+    def _clamp_score(cls, v: Any) -> int:
+        try:
+            score = int(v)
+        except (TypeError, ValueError):
+            score = 0
+        return max(0, min(score, 100))
 
 
 # ============================================================================
@@ -533,6 +651,131 @@ def generate_post(
     )
 
 
+def _quality_facts(ex: Extract) -> str:
+    key_zh = "\n".join(f"  - {s}" for s in ex.key_sentences_zh) or "  - (none)"
+    key_en = "\n".join(f"  - {s}" for s in ex.key_sentences_en) or "  - (none)"
+    return (
+        f"- Title (ZH): {ex.title_zh}\n"
+        f"- Title (EN): {ex.title_en}\n"
+        f"- Date: {ex.date or 'n/a'}\n"
+        f"- Audience: {ex.audience}\n"
+        f"- Style type: {ex.style_type}\n"
+        f"- Emoji allowed: {ex.emoji_flag}\n"
+        f"- Emoji suggestions: {', '.join(ex.emoji_suggestions) or 'none'}\n"
+        f"- Key points (ZH):\n{key_zh}\n"
+        f"- Key points (EN):\n{key_en}"
+    )
+
+
+def _quality_review_text(review: QualityReview) -> str:
+    if not review.issues:
+        return "No issues."
+    return "\n".join(
+        f"- [{i.severity}] {i.category}: {i.message}"
+        + (f" Suggestion: {i.suggestion}" if i.suggestion else "")
+        for i in review.issues
+    )
+
+
+def _post_with_quality(post: Post, review: QualityReview) -> Post:
+    post.quality_score = review.score
+    post.quality_publishable = review.publishable
+    post.quality_needs_rewrite = bool(review.needs_rewrite)
+    post.quality_issues = [i.model_dump(mode="json") for i in review.issues]
+    return post
+
+
+def review_post(
+    cfg: LLMConfig,
+    model: str,
+    ex: Extract,
+    post: Post,
+    *,
+    style_seed: str = "",
+) -> QualityReview:
+    user = (
+        QUALITY_REVIEW_USER.replace("{platform}", post.platform)
+        .replace("{title}", post.title)
+        .replace("{body}", post.body)
+        .replace("{article_facts}", _quality_facts(ex))
+        .replace("{style_seed}", style_seed or "(no style reference)")
+    )
+    review, resp = llm_call_validated(
+        cfg,
+        QualityReview,
+        system=QUALITY_REVIEW_SYSTEM,
+        user=user,
+        model=model,
+        temperature=0.2,
+    )
+    # 累计 review 调用的 token 到 post（之前漏算了）
+    post.prompt_tokens += resp.prompt_tokens
+    post.completion_tokens += resp.completion_tokens
+
+    has_high_issue = any(i.severity == "high" for i in review.issues)
+    if review.needs_rewrite is None or (has_high_issue and not review.needs_rewrite):
+        review.needs_rewrite = (not review.publishable) or review.score < 80 or has_high_issue
+    return review
+
+
+def revise_post(
+    cfg: LLMConfig,
+    model: str,
+    ex: Extract,
+    post: Post,
+    review: QualityReview,
+    *,
+    style_seed: str = "",
+) -> Post:
+    user = (
+        QUALITY_REVISE_USER.replace("{platform}", post.platform)
+        .replace("{title}", post.title)
+        .replace("{body}", post.body)
+        .replace("{article_facts}", _quality_facts(ex))
+        .replace("{style_seed}", style_seed or "(no style reference)")
+        .replace("{quality_review}", _quality_review_text(review))
+    )
+    payload, resp = llm_call_validated(
+        cfg,
+        _PostJSON,
+        system=QUALITY_REVISE_SYSTEM,
+        user=user,
+        model=model,
+        temperature=0.5,
+    )
+    post.title = payload.title
+    post.body = payload.body
+    post.prompt_tokens += resp.prompt_tokens
+    post.completion_tokens += resp.completion_tokens
+    return _post_with_quality(post, review)
+
+
+def review_and_maybe_revise(
+    cfg: LLMConfig,
+    model: str,
+    ex: Extract,
+    post: Post,
+    *,
+    style_seed: str = "",
+    min_score: int = 80,
+) -> tuple[Post, QualityReview | None]:
+    """Quality 步骤失败时优雅回退到未审稿的 post，不让单条审稿挂掉整篇文章。"""
+    try:
+        review = review_post(cfg, model, ex, post, style_seed=style_seed)
+    except Exception as e:
+        print(f"[quality] review 失败，回退为未审稿：{e}")
+        return post, None
+
+    should_revise = bool(review.needs_rewrite) or review.score < min_score or not review.publishable
+    if should_revise:
+        try:
+            return revise_post(cfg, model, ex, post, review, style_seed=style_seed), review
+        except Exception as e:
+            print(f"[quality] revise 失败，保留原稿但带审稿标记：{e}")
+            return _post_with_quality(post, review), review
+    return _post_with_quality(post, review), review
+
+
 # ============================================================================
 # 6. 网页抓取：微信公众号 + SJTU 新闻 + 通用
 # ============================================================================
@@ -621,6 +864,15 @@ def post_to_markdown(post: Post) -> str:
         "prompt_tokens": post.prompt_tokens,
         "completion_tokens": post.completion_tokens,
     }
+    if post.quality_score is not None:
+        fm.update(
+            {
+                "quality_score": post.quality_score,
+                "quality_publishable": post.quality_publishable,
+                "quality_needs_rewrite": post.quality_needs_rewrite,
+                "quality_issues": post.quality_issues,
+            }
+        )
     return (
         "---\n"
         + yaml.safe_dump(fm, allow_unicode=True, sort_keys=False)
@@ -707,6 +959,22 @@ with st.sidebar:
     max_workers = st.slider("并发数", 1, 8, 4, help="LLM 并发调用数")
     temperature = st.slider("Temperature", 0.0, 1.2, 0.7, 0.1)
     st.divider()
+    enable_quality = st.checkbox(
+        "✨ 启用质量审稿（Self-Refine）",
+        value=True,
+        help=(
+            "生成完文案后，让模型扮演主编再审一遍：评分 0-100，找出问题（事实性、平台契合度、"
+            "风格、清晰度、互动性、约束），低于 80 分自动重写一次。\n\n"
+            "**成本影响**：每条文案多 1-2 次 API 调用（取决于是否需要重写），token ≈ 翻倍。\n"
+            "**质量影响**：明显减少空话套话，提高事实准确性。"
+        ),
+    )
+    min_quality_score = st.slider(
+        "重写阈值",
+        50, 95, 80, 5,
+        help="审稿评分低于该值则自动重写一遍。设 95 = 几乎都会重写；设 50 = 只有差的才重写。",
+        disabled=not enable_quality,
+    )
     use_cache = st.checkbox("启用磁盘缓存", value=True, help=f"缓存目录：{CACHE_DIR}/")
     style_seed_text = st.text_area(
         "风格参考（可选，仅借鉴语感）",
@@ -806,18 +1074,26 @@ with tab_input:
                 for plat in chosen:
                     for v in range(1, variants + 1):
                         t = min(temperature + 0.1 * (v - 1), 1.2)
-                        posts.append(
-                            generate_post(
+                        post = generate_post(
+                            cfg,
+                            model,
+                            ex,
+                            plat,
+                            variant=v,
+                            style_seed=style_seed_text,
+                            article_slug=art["name"],
+                            temperature=t,
+                        )
+                        if enable_quality:
+                            post, _ = review_and_maybe_revise(
                                 cfg,
                                 model,
                                 ex,
-                                plat,
-                                variant=v,
+                                post,
                                 style_seed=style_seed_text,
-                                article_slug=art["name"],
-                                temperature=t,
+                                min_score=min_quality_score,
                             )
-                        )
+                        posts.append(post)
                 return idx, ex, posts, None
             except Exception as e:
                 return idx, None, [], e
@@ -920,10 +1196,25 @@ with tab_results:
                                     key=f"dl_{art['name']}_{post.platform}_{post.variant}",
                                 )
                             with cmeta:
+                                quality_bits = ""
+                                if post.quality_score is not None:
+                                    status = "可发布" if post.quality_publishable else "需编辑"
+                                    quality_bits = f" ｜ quality {post.quality_score}/100 · {status}"
                                 st.caption(
                                     f"模型 {post.model} ｜ in {post.prompt_tokens} / out "
-                                    f"{post.completion_tokens} tokens ｜ {post.generated_at.isoformat(timespec='seconds')}"
+                                    f"{post.completion_tokens} tokens{quality_bits} ｜ "
+                                    f"{post.generated_at.isoformat(timespec='seconds')}"
                                 )
+                                if post.quality_issues:
+                                    with st.expander("质量反馈"):
+                                        for issue in post.quality_issues:
+                                            st.markdown(
+                                                f"- **{issue.get('severity', 'medium')} / "
+                                                f"{issue.get('category', 'other')}**: "
+                                                f"{issue.get('message', '')}"
+                                            )
+                                            if issue.get("suggestion"):
+                                                st.caption(issue["suggestion"])
 
 # ---------- 用量 ----------
 with tab_logs:

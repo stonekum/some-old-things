@@ -30,3 +30,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 copy_workflow = ["prompts/*.md"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

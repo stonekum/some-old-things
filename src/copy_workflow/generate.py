@@ -12,6 +12,7 @@ from .config import Config
 from .extract import _split_prompt, _slug_from_filename
 from .llm import DeepSeekClient, call_with_validation, load_prompt
 from .models import Extract, Post, Platform
+from .quality import review_and_maybe_revise
 from .style_seed import build_style_seed, load_style_seed
 
 
@@ -82,19 +83,37 @@ def generate_for_extract(
                 schema=_PostJSON,
                 temperature=min(temp, 1.2),
             )
-            posts.append(
-                Post(
-                    article_slug=article_slug,
-                    platform=platform,
-                    variant=variant,
-                    title=payload.title,
-                    body=payload.body,
-                    model=cfg.models.generate,
-                    prompt_version=PROMPT_VERSION_FMT.format(platform=platform),
-                    prompt_tokens=resp.prompt_tokens,
-                    completion_tokens=resp.completion_tokens,
-                )
+            post = Post(
+                article_slug=article_slug,
+                platform=platform,
+                variant=variant,
+                title=payload.title,
+                body=payload.body,
+                model=cfg.models.generate,
+                prompt_version=PROMPT_VERSION_FMT.format(platform=platform),
+                prompt_tokens=resp.prompt_tokens,
+                completion_tokens=resp.completion_tokens,
             )
+            reviewed_post, review = review_and_maybe_revise(
+                client,
+                cfg,
+                extract,
+                post,
+                style_seed=style_seed,
+            )
+            if review is not None:
+                logger.info(
+                    {
+                        "event": "quality_review",
+                        "article_slug": article_slug,
+                        "platform": platform,
+                        "variant": variant,
+                        "score": review.score,
+                        "publishable": review.publishable,
+                        "needs_rewrite": review.needs_rewrite,
+                    }
+                )
+            posts.append(reviewed_post)
     return posts
 
 

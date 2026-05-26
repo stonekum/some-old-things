@@ -25,6 +25,15 @@ def write_markdown(cfg: Config, post: Post) -> Path:
         "prompt_tokens": post.prompt_tokens,
         "completion_tokens": post.completion_tokens,
     }
+    if post.quality_score is not None:
+        frontmatter.update(
+            {
+                "quality_score": post.quality_score,
+                "quality_publishable": post.quality_publishable,
+                "quality_needs_rewrite": post.quality_needs_rewrite,
+                "quality_issues": post.quality_issues,
+            }
+        )
 
     content = (
         "---\n"
