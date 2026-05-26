@@ -137,9 +137,9 @@ def generate_all(
     all_posts: list[Post] = []
 
     def _job(ex: Extract) -> list[Post]:
-        # intersect requested platforms with what the extractor recommended
-        chosen = [p for p in requested if p in ex.platforms] or requested
-        chosen = [p for p in chosen if p in {"instagram", "twitter", "linkedin", "facebook", "wechat"}]
+        # 直接使用调用方请求的平台，不再与 ex.platforms 取交集
+        # （模型在提取阶段经常只推荐 1-2 个平台，取交集会丢掉用户明确想要的目标）
+        chosen = [p for p in requested if p in {"instagram", "twitter", "linkedin", "facebook", "wechat"}]
         return generate_for_extract(client, cfg, ex, seed_text, chosen, variants)
 
     with ThreadPoolExecutor(max_workers=cfg.generation.max_workers) as pool:

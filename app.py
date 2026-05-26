@@ -16,15 +16,18 @@ from __future__ import annotations
 
 import hashlib
 import io
+import ipaddress
 import json
 import os
 import re
+import socket
 import time
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Literal
+from urllib.parse import urlparse
 
 import requests
 import streamlit as st
@@ -763,7 +766,10 @@ def review_and_maybe_revise(
     try:
         review = review_post(cfg, model, ex, post, style_seed=style_seed)
     except Exception as e:
-        print(f"[quality] review 失败，回退为未审稿：{e}")
+        # 通过 session state 收集错误，主循环统一展示
+        st.session_state.setdefault("_quality_errors", []).append(
+            f"{post.article_slug}/{post.platform} v{post.variant} · review 失败：{e}"
+        )
         return post, None
 
     should_revise = bool(review.needs_rewrite) or review.score < min_score or not review.publishable
@@ -771,22 +777,79 @@ def review_and_maybe_revise(
         try:
             return revise_post(cfg, model, ex, post, review, style_seed=style_seed), review
         except Exception as e:
-            print(f"[quality] revise 失败，保留原稿但带审稿标记：{e}")
+            st.session_state.setdefault("_quality_errors", []).append(
+                f"{post.article_slug}/{post.platform} v{post.variant} · revise 失败：{e}"
+            )
             return _post_with_quality(post, review), review
     return _post_with_quality(post, review), review
 
 
 # ============================================================================
-# 6. 网页抓取：微信公众号 + SJTU 新闻 + 通用
+# 6. 网页抓取：微信公众号 + SJTU 新闻 + 通用（含 SSRF 防护）
 # ============================================================================
 
 _UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
+_MAX_REDIRECTS = 3
+_MAX_RESPONSE_BYTES = 5 * 1024 * 1024  # 5MB 防止超大响应 OOM
+
+
+def _assert_safe_url(url: str) -> None:
+    """阻止 SSRF：拒绝非 http(s) 协议、内网/回环/链路本地/保留地址。"""
+    try:
+        parsed = urlparse(url)
+    except Exception as e:
+        raise ValueError(f"URL 解析失败：{e}")
+    if parsed.scheme not in {"http", "https"}:
+        raise ValueError(f"仅支持 http/https 协议，不支持 {parsed.scheme!r}")
+    host = parsed.hostname
+    if not host:
+        raise ValueError("URL 缺少主机名")
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except socket.gaierror as e:
+        raise ValueError(f"无法解析主机 {host!r}：{e}")
+    for info in infos:
+        addr = info[4][0]
+        try:
+            ip = ipaddress.ip_address(addr)
+        except ValueError:
+            continue
+        if (
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_multicast
+            or ip.is_reserved
+            or ip.is_unspecified
+        ):
+            raise ValueError(f"禁止访问内网/保留地址 {addr}（来源主机 {host}）")
+
+
+def _safe_get(url: str, *, headers: dict | None = None, timeout: int = 30) -> requests.Response:
+    """带 SSRF 防护 + redirect 上限 + 响应体大小限制的 GET。"""
+    _assert_safe_url(url)
+    session = requests.Session()
+    session.max_redirects = _MAX_REDIRECTS
+    headers = {"User-Agent": _UA, **(headers or {})}
+    r = session.get(url, headers=headers, timeout=timeout, stream=True, allow_redirects=True)
+    # 跟跳后必须重新验证最终落点
+    if r.url != url:
+        _assert_safe_url(r.url)
+    r.raise_for_status()
+
+    # 流式读取，超过上限截断
+    content = b""
+    for chunk in r.iter_content(chunk_size=64 * 1024):
+        content += chunk
+        if len(content) > _MAX_RESPONSE_BYTES:
+            raise ValueError(f"响应体超过 {_MAX_RESPONSE_BYTES // 1024 // 1024}MB 上限")
+    r._content = content  # type: ignore[attr-defined]  # 把流读完的内容塞回 response
+    return r
 
 
 def fetch_wechat(url: str) -> tuple[str, str]:
     """returns (title, body_text)"""
-    r = requests.get(url, headers={"User-Agent": _UA, "Referer": "https://mp.weixin.qq.com/"}, timeout=30)
-    r.raise_for_status()
+    r = _safe_get(url, headers={"Referer": "https://mp.weixin.qq.com/"})
     soup = BeautifulSoup(r.text, "html.parser")
     title_tag = soup.find("h1", class_="rich_media_title")
     title = title_tag.get_text(strip=True) if title_tag else "未命名"
@@ -802,9 +865,8 @@ def fetch_wechat(url: str) -> tuple[str, str]:
 
 
 def fetch_sjtu_news(url: str) -> tuple[str, str]:
-    r = requests.get(url, headers={"User-Agent": _UA, "Referer": "https://news.sjtu.edu.cn/"}, timeout=30)
+    r = _safe_get(url, headers={"Referer": "https://news.sjtu.edu.cn/"})
     r.encoding = "utf-8"
-    r.raise_for_status()
     soup = BeautifulSoup(r.text, "html.parser")
     title_tag = soup.select_one("#ivs_title")
     content_div = soup.select_one(".Article_content")
@@ -822,8 +884,7 @@ def fetch_sjtu_news(url: str) -> tuple[str, str]:
 
 
 def fetch_generic(url: str) -> tuple[str, str]:
-    r = requests.get(url, headers={"User-Agent": _UA}, timeout=30)
-    r.raise_for_status()
+    r = _safe_get(url)
     soup = BeautifulSoup(r.text, "html.parser")
     title = (soup.title.get_text(strip=True) if soup.title else url)[:120]
     for tag in soup(["script", "style", "nav", "footer", "header", "aside"]):
@@ -897,6 +958,42 @@ def zip_posts(posts: list[Post]) -> bytes:
 # ============================================================================
 
 st.set_page_config(page_title="LLM 文案生成工作流", page_icon="✍️", layout="wide")
+
+
+def _get_secret(name: str, default: str = "") -> str:
+    """优先从 Streamlit Secrets 读，回落到环境变量。两者都没设返回 default。"""
+    try:
+        # st.secrets 在没配 secrets.toml 时访问会抛 FileNotFoundError
+        if name in st.secrets:
+            return str(st.secrets[name])
+    except (FileNotFoundError, KeyError, Exception):
+        pass
+    return os.environ.get(name, default)
+
+
+def _check_app_password() -> bool:
+    """访问密码门禁。未设 APP_PASSWORD 时直接放行（本地开发友好）。"""
+    expected = _get_secret("APP_PASSWORD")
+    if not expected:
+        return True  # 没配密码 → 完全开放
+    if st.session_state.get("_authed"):
+        return True
+    st.title("🔒 访问受限")
+    st.caption("此应用受密码保护，请输入访问密码。")
+    pw = st.text_input("访问密码", type="password", key="_pw_input")
+    if pw:
+        if pw == expected:
+            st.session_state._authed = True
+            st.rerun()
+        else:
+            st.error("密码错误")
+    return False
+
+
+if not _check_app_password():
+    st.stop()
+
+
 st.title("✍️ 中→英 社交文案生成工作流")
 st.caption("一站式：抓取 / 提取双语关键信息 / 按平台批量生成")
 
@@ -919,24 +1016,28 @@ with st.sidebar:
     prov_cfg = PROVIDER_MODELS[provider]
 
     if provider == "DeepSeek 官方":
-        env_key = os.environ.get("DEEPSEEK_API_KEY", "")
-        api_key = st.text_input(
-            "DeepSeek API Key",
-            value=env_key,
-            type="password",
-            help="不会写到磁盘；也可设置环境变量 DEEPSEEK_API_KEY 自动填充",
-        )
+        env_name, key_label = "DEEPSEEK_API_KEY", "DeepSeek API Key"
         api_url = DEFAULT_API_URL
     else:
-        env_key = os.environ.get("SJTU_API_KEY", "")
-        api_key = st.text_input(
-            "交大 API Key",
-            value=env_key,
-            type="password",
-            help="从 my.sjtu.edu.cn → APP → API 处获取。校外需开 VPN。",
-        )
+        env_name, key_label = "SJTU_API_KEY", "交大 API Key"
         api_url = SJTU_API_URL
-        if not api_key:
+
+    server_key = _get_secret(env_name)
+    if server_key:
+        # 服务端已配置 → 完全隐藏输入框，访客拿不到也改不了
+        api_key = server_key
+        st.success(f"✅ {key_label} 已由服务端配置加载")
+    else:
+        api_key = st.text_input(
+            key_label,
+            type="password",
+            help=(
+                f"未在服务端配置 `{env_name}`，仅本次会话有效（不会写到磁盘）。\n\n"
+                f"**生产部署建议**：在 Streamlit Secrets / 环境变量里设 `{env_name}`，"
+                "Sidebar 就完全看不到这个输入框。"
+            ),
+        )
+        if provider == "交大内网 (SJTU)" and not api_key:
             st.info("💡 领取地址：https://my.sjtu.edu.cn/ → APP → API")
 
     # ── 模型选择 ──
@@ -1129,6 +1230,14 @@ with tab_input:
                 ss.total_tokens_out += p["completion_tokens"]
         progress.empty()
         st.success(f"完成 {len(results)} 篇，{sum(len(p) for _, p in results.values())} 条文案")
+
+        # 展示质量审稿过程中收集的错误（上一版只 print 到 stderr，用户看不到）
+        q_errs = st.session_state.pop("_quality_errors", [])
+        if q_errs:
+            with st.expander(f"⚠️ 质量审稿有 {len(q_errs)} 条警告（不影响正文产出）", expanded=False):
+                for line in q_errs:
+                    st.text(line)
+
         st.balloons()
 
 

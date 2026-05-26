@@ -52,8 +52,17 @@ streamlit run app.py
 3. Advanced settings → Secrets 里加：
    ```
    DEEPSEEK_API_KEY = "sk-你的新key"
+   # 如果用交大内网，还可以加：
+   SJTU_API_KEY = "你的交大Key"
+   # 强烈建议加访问密码，否则陌生人扫到 URL 就能用你的 Key：
+   APP_PASSWORD = "一个你自己想的强密码"
    ```
 4. 点 Deploy
+
+**安全说明：**
+- 一旦 `DEEPSEEK_API_KEY` / `SJTU_API_KEY` 设在 Secrets 里，**Sidebar 的 Key 输入框会完全消失**，访客拿不到也改不了。
+- 一旦 `APP_PASSWORD` 设在 Secrets 里，应用启动会先弹密码门禁，错误密码无法进入主界面。
+- URL 抓取经过 SSRF 防护：内网/本地/云元数据地址（10/172.16/192.168/127/169.254 等）会被拒绝，redirect 上限 3 跳，响应体上限 5MB。
 
 ---
 
