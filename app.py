@@ -195,8 +195,40 @@ JSON：{{"title":"...","body":"..."}}。""",
     ),
 }
 
-DEFAULT_API_URL = "https://api.deepseek.com/v1/chat/completions"
-PROMPT_VERSION = "v1"
+DEFAULT_API_URL  = "https://api.deepseek.com/v1/chat/completions"
+SJTU_API_URL     = "https://models.sjtu.edu.cn/api/v1/chat/completions"
+PROMPT_VERSION   = "v1"
+
+# 各提供商的可用模型及说明
+PROVIDER_MODELS = {
+    "DeepSeek 官方": {
+        "models": ["deepseek-chat", "deepseek-reasoner"],
+        "default": "deepseek-chat",
+        "help": {
+            "deepseek-chat":     "DeepSeek V3 · 速度快、费用低，日常文案推荐",
+            "deepseek-reasoner": "DeepSeek R1 · 深度推理，先「想」再输出，质量高但慢 3-5 倍、贵约 10 倍",
+        },
+    },
+    "交大内网 (SJTU)": {
+        "models": [
+            "deepseek-chat",
+            "deepseek-reasoner",
+            "minimax-m2.5",
+            "minimax",
+            "qwen3coder",
+            "qwen3vl",
+        ],
+        "default": "deepseek-chat",
+        "help": {
+            "deepseek-chat":     "DeepSeek V3.2 · 与官方同款，走交大内网，免费额度大 ✅ 文案推荐",
+            "deepseek-reasoner": "DeepSeek R1 · 深度推理，质量高，速度慢",
+            "minimax-m2.5":      "MiniMax M2.5 · 中文口语化表达出色，适合微信文案 ✅ 推荐试用",
+            "minimax":           "MiniMax（同 minimax-m2.5）",
+            "qwen3coder":        "Qwen3Coder · 专门用于写代码，不适合文案",
+            "qwen3vl":           "Qwen3VL · 图文多模态，暂时用不上",
+        },
+    },
+}
 
 
 # ============================================================================
@@ -619,23 +651,53 @@ st.caption("一站式：抓取 / 提取双语关键信息 / 按平台批量生�
 # ---------- Sidebar ----------
 with st.sidebar:
     st.header("⚙️ 配置")
-    env_key = os.environ.get("DEEPSEEK_API_KEY", "")
-    api_key = st.text_input(
-        "DeepSeek API Key",
-        value=env_key,
-        type="password",
-        help="不会写到磁盘；设置 DEEPSEEK_API_KEY 环境变量可自动填充",
-    )
-    model = st.selectbox(
-        "模型",
-        ["deepseek-chat", "deepseek-reasoner"],
+
+    # ── 提供商选择 ──
+    provider = st.radio(
+        "API 提供商",
+        list(PROVIDER_MODELS.keys()),
         index=0,
         help=(
-            "deepseek-chat：速度快、费用低，日常文案生成推荐用这个。\n\n"
-            "deepseek-reasoner（R1）：深度推理模型，会先「思考」再输出，"
-            "逻辑更严谨，但速度慢 3-5 倍、费用高约 10 倍，适合对质量要求极高时使用。"
+            "**DeepSeek 官方**：直连 api.deepseek.com，按 token 计费。\n\n"
+            "**交大内网 (SJTU)**：走 models.sjtu.edu.cn，"
+            "交大账号免费额度大，**校外需开 VPN**。\n"
+            "在 my.sjtu.edu.cn → APP → API 处领取 Key。"
         ),
     )
+    prov_cfg = PROVIDER_MODELS[provider]
+
+    if provider == "DeepSeek 官方":
+        env_key = os.environ.get("DEEPSEEK_API_KEY", "")
+        api_key = st.text_input(
+            "DeepSeek API Key",
+            value=env_key,
+            type="password",
+            help="不会写到磁盘；也可设置环境变量 DEEPSEEK_API_KEY 自动填充",
+        )
+        api_url = DEFAULT_API_URL
+    else:
+        env_key = os.environ.get("SJTU_API_KEY", "")
+        api_key = st.text_input(
+            "交大 API Key",
+            value=env_key,
+            type="password",
+            help="从 my.sjtu.edu.cn → APP → API 处获取。校外需开 VPN。",
+        )
+        api_url = SJTU_API_URL
+        if not api_key:
+            st.info("💡 领取地址：https://my.sjtu.edu.cn/ → APP → API")
+
+    # ── 模型选择 ──
+    model_list = prov_cfg["models"]
+    model_help = "\n\n".join(f"**{k}**：{v}" for k, v in prov_cfg["help"].items())
+    model = st.selectbox(
+        "模型",
+        model_list,
+        index=model_list.index(prov_cfg["default"]),
+        help=model_help,
+    )
+
+    st.divider()
     platforms_chosen = st.multiselect(
         "目标平台",
         ["instagram", "twitter", "linkedin", "facebook", "wechat"],
@@ -731,7 +793,7 @@ with tab_input:
         use_container_width=True,
         disabled=not (api_key and ss.articles and platforms_chosen),
     ):
-        cfg = LLMConfig(api_key=api_key)
+        cfg = LLMConfig(api_key=api_key, api_url=api_url)
         progress = st.progress(0.0, text="启动…")
 
         def _work_article(idx_art):
@@ -869,6 +931,7 @@ with tab_logs:
     c1.metric("累计输入 tokens", ss.total_tokens_in)
     c2.metric("累计输出 tokens", ss.total_tokens_out)
     c3.metric("已处理文章数", sum(1 for a in ss.articles if "posts" in a))
+    st.info(f"当前提供商：**{provider}** ｜ 模型：`{model}` ｜ API：`{api_url}`")
     st.caption(
         "提示：磁盘缓存按 sha256(prompt+model+...) 命中；如要强制重新生成，去掉左侧「启用磁盘缓存」并重跑。"
     )
