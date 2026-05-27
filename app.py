@@ -384,6 +384,10 @@ class Post(BaseModel):
     completion_tokens: int = 0
     # 后端实际服务的模型名 (deepseek-chat alias 可能跑 deepseek-v4-flash)
     served_model: str = ""
+    # 实际调用时使用的 API endpoint（用于审计：到底打了哪个提供商）
+    api_url: str = ""
+    # 本次结果是否来自缓存（True = 没真的调 API）
+    from_cache: bool = False
     # deepseek-reasoner 等推理模型返回的思维链；非推理模型为空
     reasoning_content: str = ""
     quality_score: int | None = None
@@ -500,8 +504,10 @@ def llm_chat(
     temperature: float = 0.7,
     no_cache: bool = False,
 ) -> LLMResponse:
-    # 缓存 key 加上 schema 版本号，老缓存（没 served_model 字段）会自动 miss
-    key = _cache_key(system, user, model, str(json_mode), f"{temperature:.2f}", "v2")
+    # cache key 必须包含 api_url，否则切换提供商会吃错缓存（之前的 bug）
+    # 例如：先在 DeepSeek 官方跑过 deepseek-chat，再切到 SJTU 内网选同一个 deepseek-chat，
+    # 没 api_url 隔离的话会命中官方的缓存，让人误以为 SJTU 在工作。
+    key = _cache_key(cfg.api_url, system, user, model, str(json_mode), f"{temperature:.2f}", "v3")
     if not no_cache:
         hit = _cache_get(key)
         if hit:
@@ -671,6 +677,8 @@ def generate_post(
         body=payload.body,
         model=model,
         served_model=resp.served_model,
+        api_url=cfg.api_url,
+        from_cache=resp.cached,
         reasoning_content=resp.reasoning_content,
         prompt_tokens=resp.prompt_tokens,
         completion_tokens=resp.completion_tokens,
@@ -1325,6 +1333,31 @@ with st.sidebar:
         "🧠 = thinking ON，💨 = fast，可据此判断 reasoner 是否真的生效。"
     )
 
+    # ── 连接测试：发一个最小请求，绕开缓存，直接验证 API 是不是真的能通 ──
+    if st.button("🔌 测试 API 连接（绕过缓存）", use_container_width=True, disabled=not api_key):
+        with st.spinner(f"正在 ping {urlparse(api_url).netloc} ..."):
+            try:
+                test_resp = llm_chat(
+                    LLMConfig(api_key=api_key, api_url=api_url, timeout=15, retries=1),
+                    system="ping",
+                    user="reply with the single word: pong",
+                    model=model,
+                    temperature=0.0,
+                    no_cache=True,  # 关键：绕过缓存
+                )
+                st.success(
+                    f"✅ 连接成功 · endpoint `{urlparse(api_url).netloc}`\n\n"
+                    f"实际服务模型：`{test_resp.served_model or '(API 未返回)'}`\n\n"
+                    f"返回内容预览：{test_resp.content[:120]}"
+                )
+            except Exception as e:
+                st.error(
+                    f"❌ 连接失败 · endpoint `{urlparse(api_url).netloc}`\n\n"
+                    f"错误：`{type(e).__name__}: {e}`\n\n"
+                    f"**如果选了 SJTU 但失败**：检查是否连了交大 VPN；"
+                    f"以前如果『成功』过那是吃了缓存。"
+                )
+
     st.divider()
     platforms_chosen = st.multiselect(
         "目标平台",
@@ -1602,8 +1635,19 @@ with tab_results:
                                 if post.served_model and post.served_model != post.model:
                                     served_bits = f"（底层 `{post.served_model}`）"
 
+                                # 缓存来源标记，提示用户「这条不是新跑的」
+                                cache_bits = " · 📦 来自缓存" if post.from_cache else " · 🌐 新调 API"
+                                # 显示这条调的是哪个 endpoint（揭穿"切了提供商但实际没切"）
+                                api_host = ""
+                                if post.api_url:
+                                    try:
+                                        api_host = urlparse(post.api_url).netloc or post.api_url
+                                    except Exception:
+                                        api_host = post.api_url
+
                                 st.caption(
-                                    f"{mode_badge} · {post.model}{served_bits} ｜ "
+                                    f"{mode_badge} · {post.model}{served_bits}{cache_bits} ｜ "
+                                    f"endpoint `{api_host}` ｜ "
                                     f"in {post.prompt_tokens} / out {post.completion_tokens} tokens"
                                     f"{quality_bits} ｜ {post.generated_at.isoformat(timespec='seconds')}"
                                 )
