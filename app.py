@@ -577,7 +577,14 @@ def llm_chat(
     for attempt in range(1, cfg.retries + 1):
         try:
             r = requests.post(cfg.api_url, json=body, headers=headers, timeout=cfg.timeout)
-            r.raise_for_status()
+            # 4xx/5xx 时把服务端返回的 body 带进异常 —— 默认 raise_for_status() 只丢状态码，
+            # 看不到 "unknown model xxx" 之类的真实原因，调 SJTU 这种自定义后端时尤其难排错。
+            if r.status_code >= 400:
+                body_preview = (r.text or "")[:500].replace("\n", " ")
+                raise requests.HTTPError(
+                    f"{r.status_code} {r.reason} for {cfg.api_url} · body: {body_preview}",
+                    response=r,
+                )
             data = r.json()
             msg = data["choices"][0]["message"]
             content = msg["content"]
@@ -1178,6 +1185,32 @@ with st.sidebar:
         "⚠️ DeepSeek 的 model 名是 **alias**：`deepseek-chat` 后端实际跑 V4 Flash，"
         "`deepseek-reasoner` 实际跑 R1 思维链版。处理完毕后结果区会显示真实模型名。"
     )
+
+    # ── 列出后端真实支持的 model ID（用于 SJTU 这种自定义后端排错） ──
+    if st.button("📋 列出该后端支持的模型", use_container_width=True, disabled=not api_key):
+        # OpenAI 兼容协议：POST /chat/completions 对应 GET /models
+        models_url = api_url.rsplit("/chat/completions", 1)[0] + "/models"
+        try:
+            mr = requests.get(
+                models_url,
+                headers={"Authorization": f"Bearer {api_key}"},
+                timeout=15,
+            )
+            if mr.status_code >= 400:
+                st.error(f"❌ `{models_url}` 返回 {mr.status_code}\n\n{mr.text[:500]}")
+            else:
+                payload = mr.json()
+                ids = [m.get("id") for m in payload.get("data", []) if m.get("id")]
+                if ids:
+                    st.success(f"✅ 后端支持 {len(ids)} 个模型：")
+                    st.code("\n".join(ids), language="text")
+                    st.caption(
+                        "把上面任一 model ID 粘到代码里 `PROVIDER_MODELS` 对应 provider 的 `models` 列表里即可。"
+                    )
+                else:
+                    st.warning(f"返回里没找到 model 列表：{payload}")
+        except Exception as e:
+            st.error(f"❌ 拉取模型列表失败：`{type(e).__name__}: {e}`")
 
     # ── 连接测试：发一个最小请求，绕开缓存，直接验证 API 是不是真的能通 ──
     if st.button("🔌 测试 API 连接（绕过缓存）", use_container_width=True, disabled=not api_key):
