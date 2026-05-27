@@ -4,6 +4,7 @@ Loads app.py as a module without running the Streamlit body (st.* calls
 happen at module load time but headless mode is fine for syntax verification).
 """
 import importlib.util
+import socket
 import sys
 from pathlib import Path
 
@@ -69,7 +70,12 @@ def test_blocks_missing_host(app_mod):
 
 
 def test_allows_public_https(app_mod):
-    # Public domain that always resolves — example.com is IANA-reserved
-    # but resolves to a real public IP (93.184.215.14 family)
+    original_getaddrinfo = socket.getaddrinfo
+
+    def fake_getaddrinfo(host, port, *args, **kwargs):
+        if host == "example.com":
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port or 443))]
+        return original_getaddrinfo(host, port, *args, **kwargs)
+
+    app_mod.socket.getaddrinfo = fake_getaddrinfo
     app_mod._assert_safe_url("https://example.com/path")
-    # Should not raise

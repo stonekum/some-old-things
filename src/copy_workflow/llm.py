@@ -13,6 +13,8 @@ from pydantic import BaseModel, ValidationError
 from .cache import JSONCache, cache_key
 from .config import Config
 
+CACHE_SCHEMA_VERSION = "llm-cache-v2"
+
 
 @dataclass
 class LLMResponse:
@@ -42,6 +44,25 @@ class DeepSeekClient:
             )
             self._logger_configured = True
 
+    def _cache_key(
+        self,
+        *,
+        system: str,
+        user: str,
+        model: str,
+        json_mode: bool,
+        temperature: float,
+    ) -> str:
+        return cache_key(
+            CACHE_SCHEMA_VERSION,
+            self.cfg.secrets.deepseek_api_url,
+            system,
+            user,
+            model,
+            str(json_mode),
+            f"{temperature:.2f}",
+        )
+
     def chat(
         self,
         *,
@@ -52,7 +73,13 @@ class DeepSeekClient:
         temperature: float = 0.7,
         no_cache: bool = False,
     ) -> LLMResponse:
-        key = cache_key(system, user, model, str(json_mode), str(temperature))
+        key = self._cache_key(
+            system=system,
+            user=user,
+            model=model,
+            json_mode=json_mode,
+            temperature=temperature,
+        )
 
         if not no_cache:
             hit = self.cache.get(key)

@@ -60,7 +60,7 @@ def extract_dir(
 ) -> list[Path]:
     """Run extraction on every .txt in input_dir; write JSON files. Returns paths written."""
     client = DeepSeekClient(cfg)
-    files = sorted(p for p in input_dir.iterdir() if p.is_file() and p.suffix == ".txt")
+    files = sorted(p for p in input_dir.rglob("*.txt") if p.is_file())
     if limit:
         files = files[:limit]
 
@@ -90,9 +90,10 @@ def extract_dir(
     return written
 
 
-def load_extracts(cfg: Config) -> list[Extract]:
+def load_extracts(cfg: Config, paths: list[Path] | None = None) -> list[Extract]:
     out: list[Extract] = []
-    for p in sorted(cfg.paths.extracted.glob("*.json")):
+    extract_paths = paths if paths is not None else sorted(cfg.paths.extracted.glob("*.json"))
+    for p in extract_paths:
         try:
             out.append(Extract.model_validate_json(p.read_text(encoding="utf-8")))
         except Exception as e:

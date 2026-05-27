@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Literal
+from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
 
-
-Platform = Literal["instagram", "twitter", "linkedin", "facebook", "wechat"]
+from .platforms import Platform, normalize_platform
 
 
 class Extract(BaseModel):
@@ -58,7 +57,7 @@ class Extract(BaseModel):
             return ["instagram"]
         if isinstance(v, str):
             v = [p.strip() for p in v.split(",")]
-        return [p.lower() for p in v if p]
+        return [normalize_platform(str(p)) for p in v if p]
 
 
 class Post(BaseModel):
@@ -78,3 +77,8 @@ class Post(BaseModel):
     quality_publishable: bool | None = None
     quality_needs_rewrite: bool | None = None
     quality_issues: list[dict[str, Any]] = Field(default_factory=list)
+
+    @field_validator("platform", mode="before")
+    @classmethod
+    def _normalise_platform(cls, v: Any) -> Platform:
+        return normalize_platform(str(v))

@@ -59,6 +59,16 @@ def test_platforms_list_lowercased():
     assert e.platforms == ["linkedin", "facebook"]
 
 
+def test_platforms_aliases_normalized():
+    e = Extract.model_validate(_minimal(platforms=["RedNote", "X", "小红书"]))
+    assert e.platforms == ["xiaohongshu", "twitter", "xiaohongshu"]
+
+
+def test_xiaohongshu_platform_accepted():
+    e = Extract.model_validate(_minimal(platforms=["xiaohongshu"]))
+    assert e.platforms == ["xiaohongshu"]
+
+
 def test_unknown_platform_rejected():
     with pytest.raises(Exception):
         Extract.model_validate(_minimal(platforms=["myspace"]))

@@ -17,7 +17,7 @@ models:
 generation:
   max_workers: 4
   variants: 1
-  default_platforms: [instagram, twitter, linkedin]
+  default_platforms: [instagram, twitter, linkedin, xiaohongshu]
   request_timeout_sec: 180
   retries: 3
   retry_backoff_sec: 8

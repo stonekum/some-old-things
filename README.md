@@ -1,9 +1,9 @@
 # copy_workflow — 中英社交文案生成工作流
 
-一站式工作流：爬取素材 → 双语提取 → 按平台批量生成文案 → 输出 Markdown
+一站式工作流：爬取素材 → 双语提取 → 按平台批量生成文案 → 质量审稿/自动修订 → 输出 Markdown
 
 ```
-爬取  →  提取（中英双语）  →  生成（按平台）  →  Markdown 文件
+爬取  →  提取（中英双语）  →  生成（按平台）  →  审稿/修订  →  Markdown 文件
 ```
 
 相比原来一堆散乱的 `.py` 脚本，主要改进：
@@ -75,10 +75,13 @@ cp .env.example .env && vim .env    # 填入 DEEPSEEK_API_KEY
 # 从已爬取的文章中提取双语结构化信息
 copy-workflow extract --input ../爬虫文/微信平台
 
-# 按平台生成文案
+# 按平台生成文案（默认读取 data/extracted 下所有提取结果）
 copy-workflow generate --platforms instagram,twitter --variants 1
 
-# 一步到位：提取 + 生成
+# 只从指定提取结果生成；可传单个 JSON、目录，或逗号分隔列表
+copy-workflow generate --extracts data/extracted/某篇文章.json --platforms instagram,twitter
+
+# 一步到位：提取 + 生成；只会生成本次提取命中的文章，不会把旧 extracts 全部重跑
 copy-workflow all --input ../爬虫文/微信平台
 
 # 爬取新文章
@@ -87,6 +90,12 @@ copy-workflow crawl sjtu_news
 ```
 
 输出文件位置：`data/posts/<日期>__<文章名>/<平台>.md`
+
+说明：
+- `extract --input` 会递归读取目录下所有 `.txt`，因此可以直接传 `data/raw/sjtu_news`。
+- `crawl` 完成后会打印下一步可复制的 `extract --input ...` 命令。
+- CLI 生成阶段默认会做质量审稿，低分或不可发布稿会自动修订一次。
+- 历史风格参考来自 `config.yaml` 的 `paths.history_dir`；该目录不存在时仍可运行，只是不会注入历史语感。
 
 ---
 

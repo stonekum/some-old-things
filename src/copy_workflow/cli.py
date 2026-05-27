@@ -19,16 +19,54 @@ def _parse_platforms(raw: str | None) -> list[str] | None:
     return [p.strip().lower() for p in raw.split(",") if p.strip()]
 
 
+def _parse_extract_paths(raw: str | None) -> list[Path] | None:
+    if not raw:
+        return None
+    paths: list[Path] = []
+    for item in [p.strip() for p in raw.split(",") if p.strip()]:
+        p = Path(item).resolve()
+        if p.is_dir():
+            paths.extend(sorted(p.rglob("*.json")))
+        else:
+            paths.append(p)
+    return paths
+
+
+def _generate_from_extract_paths(
+    cfg,
+    args: argparse.Namespace,
+    extract_paths: list[Path] | None = None,
+) -> int:
+    extracts = load_extracts(cfg, paths=extract_paths)
+    scope = "selected" if extract_paths is not None else "all"
+    if not extracts:
+        print("no extracts found; run `extract` first", file=sys.stderr)
+        return 1
+    print(f"generating from {len(extracts)} {scope} extracts")
+    posts = generate_all(
+        cfg,
+        extracts,
+        platforms=_parse_platforms(args.platforms),
+        variants=args.variants,
+    )
+    paths = export_all(cfg, posts)
+    print(f"wrote {len(paths)} markdown files under {cfg.paths.posts}")
+    return 0
+
+
 def cmd_crawl(args: argparse.Namespace) -> int:
     cfg = get_config()
     if args.source == "wechat":
         n = wechat.crawl(cfg)
+        next_input = cfg.paths.raw / "wechat"
     elif args.source == "sjtu_news":
         n = sjtu_news.crawl(cfg)
+        next_input = cfg.paths.raw / "sjtu_news"
     else:
         print(f"unknown source: {args.source}", file=sys.stderr)
         return 2
     print(f"crawled {n} articles into {cfg.paths.raw}")
+    print(f"next: copy-workflow extract --input {next_input}")
     return 0
 
 
@@ -45,26 +83,18 @@ def cmd_extract(args: argparse.Namespace) -> int:
 
 def cmd_generate(args: argparse.Namespace) -> int:
     cfg = get_config()
-    extracts = load_extracts(cfg)
-    if not extracts:
-        print("no extracts found; run `extract` first", file=sys.stderr)
-        return 1
-    posts = generate_all(
-        cfg,
-        extracts,
-        platforms=_parse_platforms(args.platforms),
-        variants=args.variants,
-    )
-    paths = export_all(cfg, posts)
-    print(f"wrote {len(paths)} markdown files under {cfg.paths.posts}")
-    return 0
+    return _generate_from_extract_paths(cfg, args, _parse_extract_paths(getattr(args, "extracts", None)))
 
 
 def cmd_all(args: argparse.Namespace) -> int:
-    rc = cmd_extract(args)
-    if rc != 0:
-        return rc
-    return cmd_generate(args)
+    cfg = get_config()
+    input_dir = Path(args.input).resolve()
+    if not input_dir.exists():
+        print(f"input dir does not exist: {input_dir}", file=sys.stderr)
+        return 2
+    written = extract_dir(cfg, input_dir, limit=args.limit, no_cache=args.no_cache)
+    print(f"extracted {len(written)} articles to {cfg.paths.extracted}")
+    return _generate_from_extract_paths(cfg, args, written)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -82,6 +112,7 @@ def main(argv: list[str] | None = None) -> int:
     p_extract.set_defaults(func=cmd_extract)
 
     p_gen = sub.add_parser("generate", help="generate per-platform markdown posts")
+    p_gen.add_argument("--extracts", default=None, help="JSON file/dir or comma list; defaults to all extracts")
     p_gen.add_argument("--platforms", default=None, help="comma list, e.g. instagram,twitter")
     p_gen.add_argument("--variants", type=int, default=None)
     p_gen.set_defaults(func=cmd_generate)

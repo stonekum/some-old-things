@@ -59,7 +59,7 @@ Output schema (strict):
   "key_sentences_en": ["the same key points in idiomatic English, one per Chinese item, same order"],
   "audience": "string — e.g. 'overseas high school / college students', 'alumni', 'general public'",
   "style_type": "string — short label e.g. 'campus_life', 'student_profile', 'event_recap', 'announcement'",
-  "platforms": ["lowercase platform list, choose from: instagram, twitter, linkedin, facebook, wechat"],
+  "platforms": ["lowercase platform list, choose from: instagram, twitter, linkedin, facebook, wechat, xiaohongshu"],
   "emoji_flag": true_or_false,
   "emoji_suggestions": ["3-6 emoji that match the topic, only if emoji_flag is true; otherwise []"]
 }
@@ -196,6 +196,33 @@ JSON: {{"title":"...","body":"..."}}.""",
 
 JSON：{{"title":"...","body":"..."}}。""",
     ),
+    "xiaohongshu": (
+        "你为高校小红书账号撰写中文图文笔记文案。语气亲切、具体、克制，"
+        "不夸张、不编造。只输出 JSON：{\"title\":\"...\",\"body\":\"...\"}。",
+        """请基于下面的素材，写一篇适合小红书发布的中文笔记文案。
+
+要求：
+- 标题 12-24 个中文字符，具体、有画面感，不标题党。
+- 正文 180-280 字，3-5 个短段落，段间空行。
+- 开头直接给出场景、人物角色或具体细节。
+- 语气自然，适合高校国际传播账号；不要使用夸张营销词。
+- 可在文末加入 3-5 个相关话题标签。
+- Emoji 规则：{emoji_directive}
+- 日期：{date_directive}
+- 严格忠于素材，不得新增姓名、奖项、机构、未出现的事实。
+
+风格参考（仅借鉴语感与节奏，不可照抄）：
+{style_seed}
+
+素材：
+- 中文标题：{title_zh}
+- 日期：{date}
+- 受众：{audience}
+- 关键点：
+{key_sentences_zh}
+
+JSON：{{"title":"...","body":"..."}}。""",
+    ),
 }
 
 QUALITY_REVIEW_SYSTEM = """\
@@ -320,7 +347,16 @@ PROVIDER_MODELS = {
 # 2. Pydantic 数据模型
 # ============================================================================
 
-Platform = Literal["instagram", "twitter", "linkedin", "facebook", "wechat"]
+Platform = Literal["instagram", "twitter", "linkedin", "facebook", "wechat", "xiaohongshu"]
+
+PLATFORM_LABELS = {
+    "instagram": "Instagram 图文",
+    "twitter": "X / Twitter 短帖",
+    "linkedin": "LinkedIn 长帖",
+    "facebook": "Facebook 贴文",
+    "wechat": "微信公众号",
+    "xiaohongshu": "小红书笔记",
+}
 
 
 class Extract(BaseModel):
@@ -367,7 +403,9 @@ class Extract(BaseModel):
         if isinstance(v, str):
             v = [p.strip() for p in v.split(",")]
         out = [p.lower() for p in v if p]
-        allowed = {"instagram", "twitter", "linkedin", "facebook", "wechat"}
+        aliases = {"rednote": "xiaohongshu", "小红书": "xiaohongshu"}
+        out = [aliases.get(p, p) for p in out]
+        allowed = {"instagram", "twitter", "linkedin", "facebook", "wechat", "xiaohongshu"}
         return [p for p in out if p in allowed] or ["instagram"]
 
 
@@ -593,8 +631,17 @@ def llm_call_validated(
     user: str,
     model: str,
     temperature: float = 0.7,
+    no_cache: bool = False,
 ) -> tuple[BaseModel, LLMResponse]:
-    resp = llm_chat(cfg, system=system, user=user, model=model, json_mode=True, temperature=temperature)
+    resp = llm_chat(
+        cfg,
+        system=system,
+        user=user,
+        model=model,
+        json_mode=True,
+        temperature=temperature,
+        no_cache=no_cache,
+    )
     try:
         return schema.model_validate(_parse_json_strict(resp.content)), resp
     except (json.JSONDecodeError, ValidationError) as e:
@@ -617,12 +664,18 @@ def llm_call_validated(
 # 5. 工作流：提取 + 生成
 # ============================================================================
 
-def extract_article(cfg: LLMConfig, model: str, text: str) -> Extract:
+def extract_article(cfg: LLMConfig, model: str, text: str, *, no_cache: bool = False) -> Extract:
     if not text.strip():
         raise ValueError("empty input text")
     user = EXTRACT_PROMPT_USER.replace("{source_text}", text[:8000])
     ex, _ = llm_call_validated(
-        cfg, Extract, system=EXTRACT_PROMPT_SYSTEM, user=user, model=model, temperature=0.2
+        cfg,
+        Extract,
+        system=EXTRACT_PROMPT_SYSTEM,
+        user=user,
+        model=model,
+        temperature=0.2,
+        no_cache=no_cache,
     )
     return ex
 
@@ -663,11 +716,18 @@ def generate_post(
     style_seed: str = "",
     article_slug: str = "article",
     temperature: float = 0.7,
+    no_cache: bool = False,
 ) -> Post:
     sys_prompt, user_tmpl = GEN_PROMPTS[platform]
     user = _format_gen_user(user_tmpl, ex, style_seed)
     payload, resp = llm_call_validated(
-        cfg, _PostJSON, system=sys_prompt, user=user, model=model, temperature=temperature
+        cfg,
+        _PostJSON,
+        system=sys_prompt,
+        user=user,
+        model=model,
+        temperature=temperature,
+        no_cache=no_cache,
     )
     return Post(
         article_slug=article_slug,
@@ -726,6 +786,7 @@ def review_post(
     post: Post,
     *,
     style_seed: str = "",
+    no_cache: bool = False,
 ) -> QualityReview:
     user = (
         QUALITY_REVIEW_USER.replace("{platform}", post.platform)
@@ -741,6 +802,7 @@ def review_post(
         user=user,
         model=model,
         temperature=0.2,
+        no_cache=no_cache,
     )
     # 累计 review 调用的 token 到 post（之前漏算了）
     post.prompt_tokens += resp.prompt_tokens
@@ -760,6 +822,7 @@ def revise_post(
     review: QualityReview,
     *,
     style_seed: str = "",
+    no_cache: bool = False,
 ) -> Post:
     user = (
         QUALITY_REVISE_USER.replace("{platform}", post.platform)
@@ -776,6 +839,7 @@ def revise_post(
         user=user,
         model=model,
         temperature=0.5,
+        no_cache=no_cache,
     )
     post.title = payload.title
     post.body = payload.body
@@ -792,10 +856,11 @@ def review_and_maybe_revise(
     *,
     style_seed: str = "",
     min_score: int = 80,
+    no_cache: bool = False,
 ) -> tuple[Post, QualityReview | None]:
     """Quality 步骤失败时优雅回退到未审稿的 post，不让单条审稿挂掉整篇文章。"""
     try:
-        review = review_post(cfg, model, ex, post, style_seed=style_seed)
+        review = review_post(cfg, model, ex, post, style_seed=style_seed, no_cache=no_cache)
     except Exception as e:
         # 通过 session state 收集错误，主循环统一展示
         st.session_state.setdefault("_quality_errors", []).append(
@@ -806,7 +871,15 @@ def review_and_maybe_revise(
     should_revise = bool(review.needs_rewrite) or review.score < min_score or not review.publishable
     if should_revise:
         try:
-            return revise_post(cfg, model, ex, post, review, style_seed=style_seed), review
+            return revise_post(
+                cfg,
+                model,
+                ex,
+                post,
+                review,
+                style_seed=style_seed,
+                no_cache=no_cache,
+            ), review
         except Exception as e:
             st.session_state.setdefault("_quality_errors", []).append(
                 f"{post.article_slug}/{post.platform} v{post.variant} · revise 失败：{e}"
@@ -975,6 +1048,23 @@ def post_to_markdown(post: Post) -> str:
     )
 
 
+def _post_body_key(article_name: str, post: Post) -> str:
+    return f"body_{article_name}_{post.platform}_{post.variant}"
+
+
+def _post_with_body(post: Post, body: str) -> Post:
+    return post.model_copy(update={"body": body})
+
+
+def _posts_from_article_state(article: dict[str, Any], state: Any) -> list[Post]:
+    posts: list[Post] = []
+    for raw in article.get("posts", []):
+        post = Post(**raw)
+        edited_body = state.get(_post_body_key(article["name"], post), post.body)
+        posts.append(_post_with_body(post, edited_body))
+    return posts
+
+
 def zip_posts(posts: list[Post]) -> bytes:
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -1032,6 +1122,7 @@ st.caption("一站式：抓取 / 提取双语关键信息 / 按平台批量生�
 # ---------- Sidebar ----------
 with st.sidebar:
     st.header("⚙️ 配置")
+    st.subheader("基础设置")
 
     # ── 提供商选择 ──
     provider = st.radio(
@@ -1116,15 +1207,18 @@ with st.sidebar:
     st.divider()
     platforms_chosen = st.multiselect(
         "目标平台",
-        ["instagram", "twitter", "linkedin", "facebook", "wechat"],
-        default=["instagram", "twitter", "linkedin"],
+        ["instagram", "twitter", "linkedin", "facebook", "wechat", "xiaohongshu"],
+        default=["instagram", "twitter", "linkedin", "xiaohongshu"],
+        format_func=lambda p: PLATFORM_LABELS.get(p, p),
+        help="可多选；不同平台会使用不同长度、语气和格式规则。",
     )
+    st.caption(f"当前将为每篇文章生成 {len(platforms_chosen)} 个平台版本")
     variants = st.slider("每个平台生成几条变体", 1, 3, 1)
     max_workers = st.slider("并发数", 1, 8, 4, help="LLM 并发调用数")
     temperature = st.slider("Temperature", 0.0, 1.2, 0.7, 0.1)
     st.divider()
     enable_quality = st.checkbox(
-        "✨ 启用质量审稿（Self-Refine）",
+        "发布前自动审稿",
         value=True,
         help=(
             "生成完文案后，让模型扮演主编再审一遍：评分 0-100，找出问题（事实性、平台契合度、"
@@ -1153,6 +1247,26 @@ ss.setdefault("articles", [])  # list[{name, text, extract?, posts?}]
 ss.setdefault("total_tokens_in", 0)
 ss.setdefault("total_tokens_out", 0)
 ss.setdefault("cache_hits", 0)
+
+estimated_posts = len(ss.articles) * len(platforms_chosen) * variants
+ready_checks = {
+    "API Key": bool(api_key),
+    "素材队列": bool(ss.articles),
+    "目标平台": bool(platforms_chosen),
+}
+
+status_cols = st.columns([1, 1, 1, 1])
+status_cols[0].metric("队列文章", len(ss.articles))
+status_cols[1].metric("目标平台", len(platforms_chosen))
+status_cols[2].metric("预计文案", estimated_posts)
+status_cols[3].metric("审稿", "开启" if enable_quality else "关闭")
+
+missing = [name for name, ok in ready_checks.items() if not ok]
+if missing:
+    st.warning("开始前还需要：" + "、".join(missing))
+else:
+    quality_note = "；审稿开启时每条文案会额外调用 1-2 次模型" if enable_quality else ""
+    st.info(f"已准备好生成 {estimated_posts} 条文案{quality_note}。")
 
 # ---------- 输入区 ----------
 tab_input, tab_results, tab_logs = st.tabs(["1️⃣ 输入素材", "2️⃣ 结果", "📊 用量"])
@@ -1219,8 +1333,13 @@ with tab_input:
             st.rerun()
 
     st.divider()
+    if estimated_posts:
+        st.caption(
+            f"将生成 {estimated_posts} 条文案：{len(ss.articles)} 篇文章 × "
+            f"{len(platforms_chosen)} 个平台 × {variants} 个变体。"
+        )
     if st.button(
-        "🚀 开始处理（提取 + 生成）",
+        f"🚀 开始生成 {estimated_posts or ''} 条文案",
         type="primary",
         use_container_width=True,
         disabled=not (api_key and ss.articles and platforms_chosen),
@@ -1231,7 +1350,7 @@ with tab_input:
         def _work_article(idx_art):
             idx, art = idx_art
             try:
-                ex = extract_article(cfg, model, art["text"])
+                ex = extract_article(cfg, model, art["text"], no_cache=not use_cache)
                 # 直接使用用户勾选的平台，不与模型推荐做交集（避免模型推荐少于用户选择时丢失平台）
                 chosen = platforms_chosen
                 posts: list[Post] = []
@@ -1247,6 +1366,7 @@ with tab_input:
                             style_seed=style_seed_text,
                             article_slug=art["name"],
                             temperature=t,
+                            no_cache=not use_cache,
                         )
                         if enable_quality:
                             post, _ = review_and_maybe_revise(
@@ -1256,6 +1376,7 @@ with tab_input:
                                 post,
                                 style_seed=style_seed_text,
                                 min_score=min_quality_score,
+                                no_cache=not use_cache,
                             )
                         posts.append(post)
                 return idx, ex, posts, None
@@ -1311,7 +1432,7 @@ with tab_results:
         st.info("还没有结果。请到「输入素材」加入文章并点「开始处理」。")
     else:
         # 顶部下载全部
-        all_posts = [Post(**p) for a in processed for p in a["posts"]]
+        all_posts = [p for a in processed for p in _posts_from_article_state(a, st.session_state)]
         st.download_button(
             "📦 下载全部 Markdown（zip）",
             data=zip_posts(all_posts),
@@ -1322,47 +1443,28 @@ with tab_results:
 
         for art in processed:
             ex = Extract(**art["extract"])
-            posts = [Post(**p) for p in art["posts"]]
+            posts = _posts_from_article_state(art, st.session_state)
 
             with st.expander(f"📰 {art['name']} —— {ex.title_en}", expanded=True):
-                with st.container():
-                    c1, c2 = st.columns(2)
-                    with c1:
-                        st.markdown(f"**中文标题**：{ex.title_zh}")
-                        st.markdown(f"**英文标题**：{ex.title_en}")
-                        st.markdown(f"**日期**：{ex.date or '—'}")
-                        st.markdown(f"**受众**：{ex.audience}")
-                    with c2:
-                        st.markdown(f"**风格**：{ex.style_type}")
-                        st.markdown(f"**推荐平台**：{', '.join(ex.platforms)}")
-                        st.markdown(f"**是否带 emoji**：{'是' if ex.emoji_flag else '否'}")
-                        if ex.emoji_suggestions:
-                            st.markdown(f"**推荐 emoji**：{' '.join(ex.emoji_suggestions)}")
-                    st.markdown("**关键句（中）**")
-                    for s in ex.key_sentences_zh:
-                        st.markdown(f"- {s}")
-                    st.markdown("**关键句（英）**")
-                    for s in ex.key_sentences_en:
-                        st.markdown(f"- {s}")
-
-                st.divider()
                 # 按平台展示
                 if posts:
                     plat_tabs = st.tabs([p.platform + (f" v{p.variant}" if p.variant > 1 else "") for p in posts])
                     for t, post in zip(plat_tabs, posts):
                         with t:
                             st.markdown(f"### {post.title}")
-                            st.text_area(
+                            body_key = _post_body_key(art["name"], post)
+                            edited_body = st.text_area(
                                 "正文",
                                 value=post.body,
                                 height=260,
-                                key=f"body_{art['name']}_{post.platform}_{post.variant}",
+                                key=body_key,
                             )
+                            edited_post = _post_with_body(post, edited_body)
                             cdl, cmeta = st.columns([1, 3])
                             with cdl:
                                 st.download_button(
                                     "⬇️ 下载 .md",
-                                    data=post_to_markdown(post),
+                                    data=post_to_markdown(edited_post),
                                     file_name=f"{art['name']}_{post.platform}.md",
                                     mime="text/markdown",
                                     key=f"dl_{art['name']}_{post.platform}_{post.variant}",
@@ -1406,6 +1508,26 @@ with tab_results:
                                 if post.reasoning_content:
                                     with st.expander("🧠 思维链（reasoner 模型专属）"):
                                         st.text(post.reasoning_content)
+
+                with st.expander("素材理解", expanded=False):
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        st.markdown(f"**中文标题**：{ex.title_zh}")
+                        st.markdown(f"**英文标题**：{ex.title_en}")
+                        st.markdown(f"**日期**：{ex.date or '—'}")
+                        st.markdown(f"**受众**：{ex.audience}")
+                    with c2:
+                        st.markdown(f"**风格**：{ex.style_type}")
+                        st.markdown(f"**推荐平台**：{', '.join(ex.platforms)}")
+                        st.markdown(f"**是否带 emoji**：{'是' if ex.emoji_flag else '否'}")
+                        if ex.emoji_suggestions:
+                            st.markdown(f"**推荐 emoji**：{' '.join(ex.emoji_suggestions)}")
+                    st.markdown("**关键句（中）**")
+                    for s in ex.key_sentences_zh:
+                        st.markdown(f"- {s}")
+                    st.markdown("**关键句（英）**")
+                    for s in ex.key_sentences_en:
+                        st.markdown(f"- {s}")
 
 # ---------- 用量 ----------
 with tab_logs:

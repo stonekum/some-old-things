@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -89,6 +90,117 @@ def _with_quality(post: Post, review: QualityReview) -> Post:
     return updated
 
 
+def _paragraph_count(body: str) -> int:
+    return len([p for p in re.split(r"\n\s*\n", body.strip()) if p.strip()])
+
+
+def _plain_text_issues(post: Post) -> list[QualityIssue]:
+    issues: list[QualityIssue] = []
+    if re.search(r"(\*\*|__|`|\[[^\]]+\]\([^)]+\)|^#{1,6}\s|^\s*> )", post.body, re.MULTILINE):
+        issues.append(
+            QualityIssue(
+                category="constraints",
+                severity="high",
+                message="Post body contains markdown, but platform prompts require plain text.",
+                suggestion="Remove markdown formatting and keep plain text only.",
+            )
+        )
+    return issues
+
+
+def _hashtag_issues(post: Post) -> list[QualityIssue]:
+    hashtags = re.findall(r"(?<!\w)#([A-Za-z][A-Za-z0-9]*)", post.body)
+    issues: list[QualityIssue] = []
+    if not 2 <= len(hashtags) <= 3:
+        issues.append(
+            QualityIssue(
+                category="constraints",
+                severity="high",
+                message="Twitter posts must end with 2-3 hashtags.",
+                suggestion="Use exactly 2 or 3 concise hashtags at the end.",
+            )
+        )
+    bad = [tag for tag in hashtags if not re.fullmatch(r"[A-Z][A-Za-z0-9]*", tag)]
+    if bad:
+        issues.append(
+            QualityIssue(
+                category="constraints",
+                severity="medium",
+                message="Twitter hashtags must use CamelCase.",
+                suggestion="Rewrite hashtags like #CampusLife or #ShanghaiJiaoTong.",
+            )
+        )
+    return issues
+
+
+def validate_hard_rules(post: Post) -> QualityReview:
+    issues = _plain_text_issues(post)
+    paragraphs = _paragraph_count(post.body)
+
+    if post.platform == "twitter":
+        if len(post.body) > 270:
+            issues.append(
+                QualityIssue(
+                    category="constraints",
+                    severity="high",
+                    message="Twitter post exceeds 270 characters.",
+                    suggestion="Shorten the body, including hashtags.",
+                )
+            )
+        if paragraphs != 1:
+            issues.append(
+                QualityIssue(
+                    category="constraints",
+                    severity="medium",
+                    message="Twitter posts must use one paragraph.",
+                    suggestion="Remove paragraph breaks from the tweet body.",
+                )
+            )
+        issues.extend(_hashtag_issues(post))
+    elif post.platform == "wechat":
+        zh_len = len(re.findall(r"[\u4e00-\u9fff]", post.body))
+        if not 220 <= zh_len <= 320:
+            issues.append(
+                QualityIssue(
+                    category="constraints",
+                    severity="high",
+                    message="WeChat body should be roughly 220-320 Chinese characters.",
+                    suggestion="Adjust the copy to fit the configured short-form range.",
+                )
+            )
+        if not 3 <= paragraphs <= 4:
+            issues.append(
+                QualityIssue(
+                    category="constraints",
+                    severity="medium",
+                    message="WeChat body should use 3-4 natural paragraphs.",
+                    suggestion="Split the body into 3 or 4 short paragraphs.",
+                )
+            )
+
+    publishable = not any(issue.severity == "high" for issue in issues)
+    return QualityReview(
+        score=100 if publishable else 0,
+        publishable=publishable,
+        needs_rewrite=not publishable or bool(issues),
+        issues=issues,
+        strengths=[],
+    )
+
+
+def _merge_reviews(hard: QualityReview, llm: QualityReview) -> QualityReview:
+    publishable = hard.publishable and llm.publishable
+    issues = [*hard.issues, *llm.issues]
+    score = min(hard.score, llm.score)
+    return QualityReview(
+        score=score,
+        publishable=publishable,
+        needs_rewrite=(not publishable) or score < 80 or any(i.severity == "high" for i in issues),
+        issues=issues,
+        strengths=llm.strengths,
+    )
+
+
 def review_post(
     client: DeepSeekClient,
     cfg: Config,
@@ -165,12 +277,28 @@ def review_and_maybe_revise(
 ) -> tuple[Post, QualityReview | None]:
     """Review the post; revise if needed. Failures are graceful — returns the
     original post with review=None if any LLM call in the quality step fails."""
+    hard_review = validate_hard_rules(post)
     try:
-        review, in_tok, out_tok = review_post(client, cfg, extract, post, style_seed=style_seed)
+        llm_review, in_tok, out_tok = review_post(client, cfg, extract, post, style_seed=style_seed)
+        review = _merge_reviews(hard_review, llm_review)
     except Exception as e:
         from loguru import logger
         logger.warning({"event": "quality_review_failed", "error": repr(e), "slug": post.article_slug})
-        return post, None
+        failed = QualityReview(
+            score=0,
+            publishable=False,
+            needs_rewrite=True,
+            issues=[
+                *hard_review.issues,
+                QualityIssue(
+                    category="constraints",
+                    severity="high",
+                    message="Quality review failed; post must not be treated as publishable.",
+                    suggestion="Run quality review again before publishing.",
+                ),
+            ],
+        )
+        return _with_quality(post, failed), None
 
     # accumulate review tokens into post (was lost before)
     post = post.model_copy(update={

@@ -12,6 +12,7 @@ from .config import Config
 from .extract import _split_prompt, _slug_from_filename
 from .llm import DeepSeekClient, call_with_validation, load_prompt
 from .models import Extract, Post, Platform
+from .platforms import PROMPT_FILES, normalize_platform, valid_platforms
 from .quality import review_and_maybe_revise
 from .style_seed import build_style_seed, load_style_seed
 
@@ -63,8 +64,9 @@ def generate_for_extract(
     posts: list[Post] = []
     article_slug = _slug_from_filename(Path(extract.source_path or extract.title_en or "untitled"))
 
-    for platform in platforms:
-        prompt_file = f"generate_{platform}.v1.md"
+    for raw_platform in platforms:
+        platform = normalize_platform(raw_platform)
+        prompt_file = PROMPT_FILES[platform]
         try:
             system, user_tmpl = _split_prompt(load_prompt(prompt_file))
         except FileNotFoundError:
@@ -139,7 +141,7 @@ def generate_all(
     def _job(ex: Extract) -> list[Post]:
         # 直接使用调用方请求的平台，不再与 ex.platforms 取交集
         # （模型在提取阶段经常只推荐 1-2 个平台，取交集会丢掉用户明确想要的目标）
-        chosen = [p for p in requested if p in {"instagram", "twitter", "linkedin", "facebook", "wechat"}]
+        chosen = valid_platforms(requested)
         return generate_for_extract(client, cfg, ex, seed_text, chosen, variants)
 
     with ThreadPoolExecutor(max_workers=cfg.generation.max_workers) as pool:

@@ -7,6 +7,7 @@ from bs4 import BeautifulSoup
 from loguru import logger
 
 from ..config import Config
+from ..url_safety import safe_get
 from ._common import download_images, make_session, read_links, sanitize_filename, save_text
 
 
@@ -37,7 +38,7 @@ def crawl(cfg: Config) -> int:
     n = 0
     for url in links:
         try:
-            r = session.get(url, timeout=30)
+            r = safe_get(session, url, timeout=30)
             r.raise_for_status()
             soup = BeautifulSoup(r.text, "html.parser")
 

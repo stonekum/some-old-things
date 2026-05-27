@@ -5,7 +5,12 @@ import yaml
 
 from copy_workflow.exporters import write_markdown
 from copy_workflow.models import Extract, Post
-from copy_workflow.quality import QualityIssue, QualityReview, review_and_maybe_revise
+from copy_workflow.quality import (
+    QualityIssue,
+    QualityReview,
+    review_and_maybe_revise,
+    validate_hard_rules,
+)
 
 
 class _FakeConfig:
@@ -171,3 +176,58 @@ def test_write_markdown_includes_quality_frontmatter(tmp_path: Path):
     assert data["quality_score"] == 84
     assert data["quality_publishable"] is True
     assert data["quality_issues"][0]["category"] == "engagement"
+
+
+def test_hard_rules_flag_twitter_length_hashtags_and_markdown():
+    post = Post(
+        article_slug="campus-event",
+        platform="twitter",
+        variant=1,
+        title="Campus Event",
+        body=("**Big campus update** " * 20) + "#lowercase #TooMany #Tags #Here",
+        model="deepseek-chat",
+        prompt_version="generate_twitter.v1",
+        generated_at=datetime(2026, 1, 1),
+    )
+
+    review = validate_hard_rules(post)
+
+    messages = [issue.message for issue in review.issues]
+    assert review.publishable is False
+    assert any("270 characters" in message for message in messages)
+    assert any("2-3 hashtags" in message for message in messages)
+    assert any("CamelCase" in message for message in messages)
+    assert any("markdown" in message.lower() for message in messages)
+
+
+def test_hard_rules_flag_wechat_word_range_and_paragraphs():
+    post = Post(
+        article_slug="campus-event",
+        platform="wechat",
+        variant=1,
+        title="校园活动",
+        body="太短了。",
+        model="deepseek-chat",
+        prompt_version="generate_wechat.v1",
+        generated_at=datetime(2026, 1, 1),
+    )
+
+    review = validate_hard_rules(post)
+
+    assert review.publishable is False
+    assert any("220-320" in issue.message for issue in review.issues)
+    assert any("3-4" in issue.message for issue in review.issues)
+
+
+def test_review_failure_marks_post_not_publishable():
+    class _FailingClient:
+        def chat(self, **kwargs):
+            raise RuntimeError("review unavailable")
+
+    post, review = review_and_maybe_revise(_FailingClient(), _FakeConfig(), _extract(), _post())
+
+    assert review is None
+    assert post.quality_publishable is False
+    assert post.quality_needs_rewrite is True
+    assert post.quality_score == 0
+    assert post.quality_issues[0]["category"] == "constraints"

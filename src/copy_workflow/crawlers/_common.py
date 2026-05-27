@@ -7,6 +7,11 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+from ..url_safety import UnsafeURLError, safe_get
+
+
+MAX_IMAGE_BYTES = 10 * 1024 * 1024
+
 
 def make_session(user_agent: str, referer: str | None = None) -> requests.Session:
     s = requests.Session()
@@ -42,14 +47,20 @@ def save_text(out_path: Path, body: str) -> None:
 def download_images(
     session: requests.Session, urls: list[str], out_dir: Path, prefix: str
 ) -> int:
-    out_dir.mkdir(parents=True, exist_ok=True)
     count = 0
     for idx, url in enumerate(urls, start=1):
         try:
-            r = session.get(url, stream=True, timeout=20)
-            if r.status_code == 200 and r.content:
+            r = safe_get(
+                session,
+                url,
+                timeout=20,
+                max_bytes=MAX_IMAGE_BYTES,
+                allowed_content_types=("image/",),
+            )
+            if r.content:
+                out_dir.mkdir(parents=True, exist_ok=True)
                 (out_dir / f"{prefix}_{idx}.jpg").write_bytes(r.content)
                 count += 1
-        except requests.RequestException:
+        except (OSError, UnsafeURLError, requests.RequestException, ValueError):
             continue
     return count
