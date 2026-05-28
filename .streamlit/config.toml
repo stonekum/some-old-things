@@ -1,0 +1,15 @@
+# Streamlit 主题与运行时配置 · 控制部署后的视觉与隐私默认值。
+# 注：Streamlit Cloud 的 Secrets 仍走 dashboard 配置，不在此处。
+
+[theme]
+base = "light"
+primaryColor = "#E2231A"   # 上海交大校徽红
+font = "sans serif"
+
+[browser]
+# 关掉 Streamlit 自动上报使用统计（保护用户隐私）
+gatherUsageStats = false
+
+[server]
+# 限制上传单文件大小（MB），防止误传大文件占资源
+maxUploadSize = 10
