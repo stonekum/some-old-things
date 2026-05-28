@@ -536,9 +536,11 @@ class LLMResponse:
 class LLMConfig:
     api_key: str
     api_url: str = DEFAULT_API_URL
-    timeout: int = 180
-    retries: int = 3
-    retry_backoff: int = 8
+    # 60s 单次 / 重试 2 次 / backoff 4s × attempt —— 总上限 ~2 分钟
+    # 之前 180×3+8×n 走完要 10 分钟，前端只看到一直转圈，看着像"卡死"。
+    timeout: int = 60
+    retries: int = 2
+    retry_backoff: int = 4
 
 
 def llm_chat(
@@ -584,9 +586,13 @@ def llm_chat(
 
     last_err: Exception | None = None
     json_mode_disabled = False  # 记录是否因为后端不支持 response_format 而降级过
+    host = urlparse(cfg.api_url).netloc
     for attempt in range(1, cfg.retries + 1):
         try:
+            t0 = time.time()
+            print(f"[llm_chat] → {host} model={model} json_mode={'response_format' in body} attempt={attempt}", flush=True)
             r = requests.post(cfg.api_url, json=body, headers=headers, timeout=cfg.timeout)
+            print(f"[llm_chat] ← {host} status={r.status_code} elapsed={time.time()-t0:.1f}s", flush=True)
             # 4xx 自动降级：很多代理后端（SJTU/Azure/自建网关）不支持 OpenAI 私有的
             # response_format={"type":"json_object"}，会直接 400。检测到时去掉该字段重试一次，
             # 模型仍会按 prompt 里 "Return JSON only" 的指令吐 JSON，下游 _parse_json_strict 会处理 fence。
@@ -631,8 +637,9 @@ def llm_chat(
             return out
         except (requests.RequestException, KeyError, ValueError) as e:
             last_err = e
+            print(f"[llm_chat] ✗ {host} attempt={attempt} err={type(e).__name__}: {str(e)[:200]}", flush=True)
             time.sleep(cfg.retry_backoff * attempt)
-    raise RuntimeError(f"LLM call failed after retries: {last_err}")
+    raise RuntimeError(f"LLM call failed after {cfg.retries} retries · last_err: {last_err}")
 
 
 def _parse_json_strict(text: str) -> dict:
@@ -1396,11 +1403,18 @@ with tab_input:
     ):
         cfg = LLMConfig(api_key=api_key, api_url=api_url)
         progress = st.progress(0.0, text="启动…")
+        log_area = st.empty()
+        # SJTU/自建网关常有慢响应，开 4 个并发反而更糟 —— 单线程顺序跑，前端能看到进度
+        # 同时让顶层异常直接显示，避免 ThreadPoolExecutor 把它吞掉
+        effective_workers = max(1, max_workers) if "deepseek.com" in api_url else 1
+        log_area.info(f"⚙️ 并发：{effective_workers} 路 · timeout={cfg.timeout}s · retries={cfg.retries}")
 
         def _work_article(idx_art):
             idx, art = idx_art
             try:
+                print(f"[work] 第 {idx+1} 篇开始 extract", flush=True)
                 ex = extract_article(cfg, model, art["text"], no_cache=not use_cache)
+                print(f"[work] 第 {idx+1} 篇 extract 完成 · 进入 generate", flush=True)
                 # 直接使用用户勾选的平台，不与模型推荐做交集（避免模型推荐少于用户选择时丢失平台）
                 chosen = platforms_chosen
                 posts: list[Post] = []
@@ -1435,20 +1449,27 @@ with tab_input:
 
         results: dict[int, tuple[Extract, list[Post]]] = {}
         errors: dict[int, Exception] = {}
-        with ThreadPoolExecutor(max_workers=max_workers) as pool:
-            futs = [
-                pool.submit(_work_article, (i, a)) for i, a in enumerate(ss.articles)
-            ]
-            done = 0
-            total = len(futs)
-            for f in as_completed(futs):
-                idx, ex, posts, err = f.result()
-                done += 1
-                progress.progress(done / total, text=f"完成 {done}/{total}")
-                if err:
-                    errors[idx] = err
-                else:
-                    results[idx] = (ex, posts)
+        try:
+            with ThreadPoolExecutor(max_workers=effective_workers) as pool:
+                futs = [
+                    pool.submit(_work_article, (i, a)) for i, a in enumerate(ss.articles)
+                ]
+                done = 0
+                total = len(futs)
+                for f in as_completed(futs):
+                    idx, ex, posts, err = f.result()
+                    done += 1
+                    progress.progress(done / total, text=f"完成 {done}/{total}")
+                    log_area.info(f"⚙️ 进度 {done}/{total} · 当前完成第 {idx+1} 篇" + (f" ❌ {type(err).__name__}" if err else " ✅"))
+                    if err:
+                        errors[idx] = err
+                    else:
+                        results[idx] = (ex, posts)
+        except Exception as fatal:
+            # ThreadPoolExecutor 本身挂了的兜底 —— 比如 Streamlit 把进程信号传错
+            progress.empty()
+            st.exception(fatal)
+            st.stop()
 
         # 写回 session state
         for idx, (ex, posts) in results.items():
