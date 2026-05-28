@@ -1249,8 +1249,64 @@ if not _check_app_password():
     st.stop()
 
 
-st.title("✍️ 中→英 社交文案生成工作流")
-st.caption("一站式：抓取 / 提取双语关键信息 / 按平台批量生成")
+# ---------- 页面视觉（中国大学门户风格） ----------
+st.markdown(
+    """
+    <style>
+    :root {
+      --sjtu-red: #982E3A;
+      --sjtu-red-deep: #7E2430;
+      --portal-ink: #1f2d3d;
+      --portal-border: #d8dee6;
+      --portal-bg: #f5f7fa;
+    }
+    .stApp { background: var(--portal-bg); }
+    .portal-header {
+      background: linear-gradient(90deg, var(--sjtu-red) 0%, var(--sjtu-red-deep) 100%);
+      border: 1px solid #7b2631;
+      border-radius: 8px;
+      color: #fff;
+      padding: 14px 18px;
+      margin-bottom: 10px;
+      box-shadow: 0 1px 3px rgba(0,0,0,.08);
+    }
+    .portal-header h1 { margin: 0; font-size: 1.35rem; letter-spacing: .5px; }
+    .portal-header p { margin: 4px 0 0; opacity: .95; font-size: .92rem; }
+    .portal-nav {
+      background: #fff;
+      border: 1px solid var(--portal-border);
+      border-radius: 6px;
+      padding: 8px 12px;
+      margin-bottom: 14px;
+      color: var(--portal-ink);
+      font-size: .92rem;
+    }
+    .portal-nav span { margin-right: 18px; font-weight: 600; }
+    .portal-notice {
+      background: #fff;
+      border-left: 4px solid var(--sjtu-red);
+      border-top: 1px solid var(--portal-border);
+      border-right: 1px solid var(--portal-border);
+      border-bottom: 1px solid var(--portal-border);
+      border-radius: 4px;
+      padding: 10px 12px;
+      margin: 6px 0 14px;
+      color: #223;
+      font-size: .9rem;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+st.title("✍️ 上海交通大学 · 中→英 社交文案生成工作流")
+st.caption("党委宣传部（示例）｜校园新闻国际传播辅助系统")
+
+nav_cols = st.columns(5)
+for col, label in zip(nav_cols, ["首页", "通知公告", "素材采编", "多平台发布", "统计归档"]):
+    col.markdown(f"**{label}**")
+
+st.info("【系统公告】本系统用于校园新闻内容提炼与多平台文案生成，请严格遵守事实性与版权规范。")
 
 # ---------- Sidebar ----------
 with st.sidebar:
