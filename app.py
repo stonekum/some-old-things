@@ -314,11 +314,21 @@ PROMPT_VERSION   = "v1"
 # 各提供商的可用模型及说明
 PROVIDER_MODELS = {
     "DeepSeek 官方": {
-        "models": ["deepseek-chat", "deepseek-reasoner"],
-        "default": "deepseek-chat",
+        # 按 V4 命名直接走新模型 ID。旧 alias deepseek-chat / deepseek-reasoner
+        # 2026-07-24 15:59 UTC 退役（已通过 DeepSeek API Docs 确认）。
+        # 思维链由 sidebar 的 "启用思维链" 单独控制，不再隐含在模型名里。
+        "models": [
+            "deepseek-v4-flash",
+            "deepseek-v4-pro",
+            "deepseek-chat",        # legacy alias
+            "deepseek-reasoner",    # legacy alias
+        ],
+        "default": "deepseek-v4-flash",
         "help": {
-            "deepseek-chat":     "DeepSeek V3 · 速度快、费用低，日常文案推荐",
-            "deepseek-reasoner": "DeepSeek R1 · 深度推理，先「想」再输出，质量高但慢 3-5 倍、贵约 10 倍",
+            "deepseek-v4-flash": "DeepSeek V4 Flash · 284B 总参 / 13B 激活 · 速度快、费用低 ✅ 推荐",
+            "deepseek-v4-pro":   "DeepSeek V4 Pro · 1.6T 总参 / 49B 激活 · 复杂推理 / Agent / 代码任务",
+            "deepseek-chat":     "[兼容旧 alias] 等价于 v4-flash 非思维链 · 2026-07-24 退役",
+            "deepseek-reasoner": "[兼容旧 alias] 等价于 v4-flash 思维链   · 2026-07-24 退役",
         },
     },
     "交大内网 (SJTU)": {
@@ -541,6 +551,9 @@ class LLMConfig:
     timeout: int = 60
     retries: int = 2
     retry_backoff: int = 4
+    # 思维链开关：None 表示按 alias 默认行为（legacy chat/reasoner 用这条路径）
+    # True/False 表示显式开/关（新 v4-flash/pro 用这条路径）
+    thinking: bool | None = None
 
 
 def llm_chat(
@@ -553,10 +566,16 @@ def llm_chat(
     temperature: float = 0.7,
     no_cache: bool = False,
 ) -> LLMResponse:
-    # cache key 必须包含 api_url，否则切换提供商会吃错缓存（之前的 bug）
-    # 例如：先在 DeepSeek 官方跑过 deepseek-chat，再切到 SJTU 内网选同一个 deepseek-chat，
-    # 没 api_url 隔离的话会命中官方的缓存，让人误以为 SJTU 在工作。
-    key = _cache_key(cfg.api_url, system, user, model, str(json_mode), f"{temperature:.2f}", "v3")
+    # cache key 必须包含 api_url + thinking 状态。
+    # - api_url：跨提供商隔离（DeepSeek 官方 vs SJTU 内网）
+    # - thinking：同一模型开/关思维链产出不同，必须分桶
+    # v4 = 加入 thinking 维度
+    key = _cache_key(
+        cfg.api_url, system, user, model,
+        str(json_mode), f"{temperature:.2f}",
+        f"thinking={cfg.thinking}",
+        "v4",
+    )
     if not no_cache:
         hit = _cache_get(key)
         if hit:
@@ -579,6 +598,10 @@ def llm_chat(
     }
     if json_mode:
         body["response_format"] = {"type": "json_object"}
+    # 思维链开关：cfg.thinking 显式为 True/False 时下发，None 让服务端按 alias 默认决定
+    # 参考: https://api-docs.deepseek.com/zh-cn/guides/thinking_mode
+    if cfg.thinking is not None:
+        body["thinking"] = {"type": "enabled" if cfg.thinking else "disabled"}
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {cfg.api_key}",
@@ -1196,6 +1219,25 @@ with st.sidebar:
         help=model_help,
     )
 
+    # ── 思维链开关 ──
+    # 新 V4 模型（deepseek-v4-flash / pro）需要显式控制思维链
+    # 旧 alias（deepseek-chat / deepseek-reasoner）由 alias 自身决定，UI 不显示开关
+    is_legacy_alias = model in {"deepseek-chat", "deepseek-reasoner"}
+    if is_legacy_alias:
+        thinking_setting: bool | None = None
+        if model == "deepseek-reasoner":
+            st.caption("🧠 思维链由旧 alias 隐含开启")
+        else:
+            st.caption("💬 旧 alias 不带思维链")
+    else:
+        # V4-flash 默认关；V4-pro 也默认关让用户主动开
+        thinking_setting = st.checkbox(
+            "🧠 启用思维链 (thinking mode)",
+            value=False,
+            help="开启后模型先输出推理过程再给答案，质量更高但慢 3-5 倍、token 多 2-5 倍",
+            key=f"thinking_toggle_{provider}_{model}",
+        )
+
     # ── 列出后端真实支持的 model ID（用于 SJTU 这种自定义后端排错） ──
     if st.button("📋 列出该后端支持的模型", use_container_width=True, disabled=not api_key):
         # OpenAI 兼容协议：POST /chat/completions 对应 GET /models
@@ -1227,24 +1269,27 @@ with st.sidebar:
         with st.spinner(f"正在 ping {urlparse(api_url).netloc} ..."):
             try:
                 test_resp = llm_chat(
-                    LLMConfig(api_key=api_key, api_url=api_url, timeout=15, retries=1),
+                    LLMConfig(api_key=api_key, api_url=api_url, timeout=15, retries=1, thinking=thinking_setting),
                     system="ping",
                     user="reply with the single word: pong",
                     model=model,
                     temperature=0.0,
                     no_cache=True,  # 关键：绕过缓存
                 )
-                # 判断思维链是否真的激活 —— 看 reasoning_content 是不是非空
+                # 通过响应里有没有 reasoning_content 判断思维链是否激活
                 thinking_active = bool(test_resp.reasoning_content)
-                if model == "deepseek-reasoner":
-                    if thinking_active:
-                        mode_line = "🧠 思维链 ✅ 已激活（R1 模式）"
-                    else:
-                        mode_line = "⚠️ 选了 reasoner 但未返回 reasoning_content（思维链没激活）"
-                elif model == "deepseek-chat":
-                    mode_line = "💬 非思维链（V3 chat 模式）"
+                expect_thinking = (
+                    thinking_setting if thinking_setting is not None
+                    else model == "deepseek-reasoner"
+                )
+                if expect_thinking and thinking_active:
+                    mode_line = "🧠 思维链 ✅ 已激活"
+                elif expect_thinking and not thinking_active:
+                    mode_line = "⚠️ 期望思维链但 reasoning_content 为空（可能后端不支持/未生效）"
+                elif not expect_thinking and thinking_active:
+                    mode_line = "ℹ️ 后端意外开启了思维链"
                 else:
-                    mode_line = f"🔧 思维链：{'是' if thinking_active else '否'}"
+                    mode_line = "💬 非思维链模式"
                 st.success(
                     f"✅ 连接成功 · `{urlparse(api_url).netloc}`\n\n"
                     f"{mode_line}\n\n"
@@ -1393,7 +1438,7 @@ with tab_input:
         use_container_width=True,
         disabled=not (api_key and ss.articles and platforms_chosen),
     ):
-        cfg = LLMConfig(api_key=api_key, api_url=api_url)
+        cfg = LLMConfig(api_key=api_key, api_url=api_url, thinking=thinking_setting)
         # SJTU/自建网关常有慢响应，开 4 个并发反而更糟 —— 走 deepseek.com 以外的全部强制单线程
         use_concurrent = "deepseek.com" in api_url and max_workers > 1
         # 估算总步骤数 = 篇数 × (1 extract + 平台数 × 变体数 × (1 generate + 质量审核 0~2 次))
