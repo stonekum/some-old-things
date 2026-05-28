@@ -32,10 +32,10 @@ cp .env.example .env
 
 ## 方式一：Streamlit 网页版（推荐）
 
-单文件，无需安装包，直接跑：
+单文件，无需手动管理包：
 
 ```bash
-pip install -r requirements.txt
+pip install -e ".[streamlit]"
 streamlit run app.py
 ```
 
@@ -63,6 +63,21 @@ streamlit run app.py
 - 一旦 `DEEPSEEK_API_KEY` / `SJTU_API_KEY` 设在 Secrets 里，**Sidebar 的 Key 输入框会完全消失**，访客拿不到也改不了。
 - 一旦 `APP_PASSWORD` 设在 Secrets 里，应用启动会先弹密码门禁，错误密码无法进入主界面。
 - URL 抓取经过 SSRF 防护：内网/本地/云元数据地址（10/172.16/192.168/127/169.254 等）会被拒绝，redirect 上限 3 跳，响应体上限 5MB。
+
+---
+
+## 模型与提供商
+
+支持两个 API 提供商，侧边栏切换：
+
+- **DeepSeek 官方** · 直连 `api.deepseek.com`，按 token 计费
+  - `deepseek-v4-flash`（默认）· 284B / 13B 激活参数 · 速度快、便宜
+  - `deepseek-v4-pro` · 1.6T / 49B 激活参数 · 复杂推理 / Agent / 代码任务
+  - 旁边的 `🧠 启用思维链` 开关控制是否走 thinking mode
+- **交大内网 (SJTU)** · 走 `models.sjtu.edu.cn`，免费额度大，**校外需 VPN**
+  - Key 领取：`my.sjtu.edu.cn → APP → API`
+
+旧 `deepseek-chat` / `deepseek-reasoner` alias 已于 2026-07-24 退役，本项目默认列表不再列出。
 
 ---
 
@@ -132,3 +147,17 @@ src/copy_workflow/
 legacy/                  原始旧脚本归档（仅供参考，密钥已脱敏）
 tests/                   单元测试（26 个，覆盖缓存、模型校验、JSON 解析）
 ```
+
+---
+
+## 排错
+
+| 症状 | 原因 / 处理 |
+|---|---|
+| 点生成后没反应 | API 慢响应。看 streamlit 终端的 `[llm_chat]` 日志确认是否仍在调用 |
+| `400 Bad Request` 含 `response_format` | SJTU/自建代理不支持 OpenAI JSON 模式；代码会自动降级重试 |
+| ping 通但生成卡住 | VPN 增加延迟，单次 10-25s × N 平台 = 几分钟；关掉质量审核可加速 |
+| `ConnectionError` 连 SJTU | 检查是否开了交大 VPN |
+| 切换 provider 后吃旧缓存 | v4 缓存 key 已含 api_url + thinking，不再串味；右下角"清空所有结果"可强制刷新 |
+| `400` 提示模型不存在 | 用 sidebar 的"🔧 诊断工具 → 📋 列出该后端支持的模型"看真实可用列表 |
+

@@ -38,8 +38,8 @@ class Paths(BaseModel):
 
 
 class Models(BaseModel):
-    extract: str = "deepseek-chat"
-    generate: str = "deepseek-chat"
+    extract: str = "deepseek-v4-flash"
+    generate: str = "deepseek-v4-flash"
 
 
 class Generation(BaseModel):

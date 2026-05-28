@@ -11,8 +11,8 @@ paths:
   style_seed: data/style_seed.json
 
 models:
-  extract: deepseek-chat
-  generate: deepseek-chat
+  extract: deepseek-v4-flash
+  generate: deepseek-v4-flash
 
 generation:
   max_workers: 4

@@ -1289,10 +1289,10 @@ with st.sidebar:
                 )
             except Exception as e:
                 st.error(
-                    f"❌ 连接失败 · endpoint `{urlparse(api_url).netloc}`\n\n"
+                    f"❌ 连接失败 · `{urlparse(api_url).netloc}`\n\n"
                     f"错误：`{type(e).__name__}: {e}`\n\n"
-                    f"**如果选了 SJTU 但失败**：检查是否连了交大 VPN；"
-                    f"以前如果『成功』过那是吃了缓存。"
+                    f"**SJTU 失败**：确认连接了交大 VPN。\n\n"
+                    f"**DeepSeek 失败**：检查 Key 是否在 platform.deepseek.com 仍有效。"
                 )
 
     st.divider()
