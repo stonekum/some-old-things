@@ -583,9 +583,17 @@ def llm_chat(
     }
 
     last_err: Exception | None = None
+    json_mode_disabled = False  # 记录是否因为后端不支持 response_format 而降级过
     for attempt in range(1, cfg.retries + 1):
         try:
             r = requests.post(cfg.api_url, json=body, headers=headers, timeout=cfg.timeout)
+            # 4xx 自动降级：很多代理后端（SJTU/Azure/自建网关）不支持 OpenAI 私有的
+            # response_format={"type":"json_object"}，会直接 400。检测到时去掉该字段重试一次，
+            # 模型仍会按 prompt 里 "Return JSON only" 的指令吐 JSON，下游 _parse_json_strict 会处理 fence。
+            if r.status_code == 400 and "response_format" in body and not json_mode_disabled:
+                body.pop("response_format", None)
+                json_mode_disabled = True
+                continue
             # 4xx/5xx 时把服务端返回的 body 带进异常 —— 默认 raise_for_status() 只丢状态码，
             # 看不到 "unknown model xxx" 之类的真实原因，调 SJTU 这种自定义后端时尤其难排错。
             if r.status_code >= 400:
@@ -1446,15 +1454,19 @@ with tab_input:
         for idx, (ex, posts) in results.items():
             ss.articles[idx]["extract"] = ex.model_dump(mode="json")
             ss.articles[idx]["posts"] = [p.model_dump(mode="json") for p in posts]
-        for idx, e in errors.items():
-            st.error(f"第 {idx + 1} 篇失败：{e}")
+        # 先把进度条清掉再显示错误 —— 否则 spinner/progress 会盖住 st.error，让人以为"没反应"
+        progress.empty()
+        if errors:
+            st.error(f"❌ {len(errors)} 篇生成失败（其余 {len(results)} 篇已完成）")
+            for idx, e in errors.items():
+                with st.expander(f"第 {idx + 1} 篇失败 · {type(e).__name__}", expanded=True):
+                    st.code(str(e), language="text")
 
         # token 统计
         for posts_dump in (ss.articles[i].get("posts", []) for i in results):
             for p in posts_dump:
                 ss.total_tokens_in += p["prompt_tokens"]
                 ss.total_tokens_out += p["completion_tokens"]
-        progress.empty()
         st.success(f"完成 {len(results)} 篇，{sum(len(p) for _, p in results.values())} 条文案")
 
         # 展示质量审稿过程中收集的错误（上一版只 print 到 stderr，用户看不到）
