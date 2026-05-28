@@ -1402,42 +1402,77 @@ with tab_input:
         disabled=not (api_key and ss.articles and platforms_chosen),
     ):
         cfg = LLMConfig(api_key=api_key, api_url=api_url)
-        progress = st.progress(0.0, text="启动…")
+        # SJTU/自建网关常有慢响应，开 4 个并发反而更糟 —— 走 deepseek.com 以外的全部强制单线程
+        use_concurrent = "deepseek.com" in api_url and max_workers > 1
+        # 估算总步骤数 = 篇数 × (1 extract + 平台数 × 变体数 × (1 generate + 质量审核 0~2 次))
+        steps_per_article = 1 + len(platforms_chosen) * variants * (3 if enable_quality else 1)
+        total_steps = len(ss.articles) * steps_per_article
+        progress = st.progress(0.0, text=f"准备 · 预计 {total_steps} 次 LLM 调用")
         log_area = st.empty()
-        # SJTU/自建网关常有慢响应，开 4 个并发反而更糟 —— 单线程顺序跑，前端能看到进度
-        # 同时让顶层异常直接显示，避免 ThreadPoolExecutor 把它吞掉
-        effective_workers = max(1, max_workers) if "deepseek.com" in api_url else 1
-        log_area.info(f"⚙️ 并发：{effective_workers} 路 · timeout={cfg.timeout}s · retries={cfg.retries}")
+        log_area.info(
+            f"⚙️ 后端 `{urlparse(api_url).netloc}` · "
+            f"{'并发 ' + str(max_workers) + ' 路' if use_concurrent else '单线程'} · "
+            f"timeout={cfg.timeout}s · retries={cfg.retries} · 预计 {total_steps} 次调用"
+        )
 
-        def _work_article(idx_art):
+        results: dict[int, tuple[Extract, list[Post]]] = {}
+        errors: dict[int, Exception] = {}
+
+        # 单线程路径：每个步骤前后都能更新前端，看得到当前在做什么
+        def _run_single_threaded():
+            step = 0
+            for idx, art in enumerate(ss.articles):
+                try:
+                    log_area.info(f"📝 第 {idx+1}/{len(ss.articles)} 篇 · extract...")
+                    ex = extract_article(cfg, model, art["text"], no_cache=not use_cache)
+                    step += 1
+                    progress.progress(step / total_steps, text=f"{step}/{total_steps} · 第 {idx+1} 篇 extract 完成")
+
+                    posts: list[Post] = []
+                    for plat in platforms_chosen:
+                        for v in range(1, variants + 1):
+                            t = min(temperature + 0.1 * (v - 1), 1.2)
+                            log_area.info(f"✍️ 第 {idx+1}/{len(ss.articles)} 篇 · {plat} v{v} · generate...")
+                            post = generate_post(
+                                cfg, model, ex, plat,
+                                variant=v, style_seed=style_seed_text,
+                                article_slug=art["name"], temperature=t,
+                                no_cache=not use_cache,
+                            )
+                            step += 1
+                            progress.progress(step / total_steps, text=f"{step}/{total_steps}")
+                            if enable_quality:
+                                log_area.info(f"🔍 第 {idx+1}/{len(ss.articles)} 篇 · {plat} v{v} · quality review...")
+                                post, _ = review_and_maybe_revise(
+                                    cfg, model, ex, post,
+                                    style_seed=style_seed_text,
+                                    min_score=min_quality_score,
+                                    no_cache=not use_cache,
+                                )
+                                step += 2  # review + maybe revise
+                                progress.progress(min(step / total_steps, 1.0), text=f"{step}/{total_steps}")
+                            posts.append(post)
+                    results[idx] = (ex, posts)
+                except Exception as e:
+                    errors[idx] = e
+
+        def _work_article_threaded(idx_art):
             idx, art = idx_art
             try:
-                print(f"[work] 第 {idx+1} 篇开始 extract", flush=True)
                 ex = extract_article(cfg, model, art["text"], no_cache=not use_cache)
-                print(f"[work] 第 {idx+1} 篇 extract 完成 · 进入 generate", flush=True)
-                # 直接使用用户勾选的平台，不与模型推荐做交集（避免模型推荐少于用户选择时丢失平台）
-                chosen = platforms_chosen
                 posts: list[Post] = []
-                for plat in chosen:
+                for plat in platforms_chosen:
                     for v in range(1, variants + 1):
                         t = min(temperature + 0.1 * (v - 1), 1.2)
                         post = generate_post(
-                            cfg,
-                            model,
-                            ex,
-                            plat,
-                            variant=v,
-                            style_seed=style_seed_text,
-                            article_slug=art["name"],
-                            temperature=t,
+                            cfg, model, ex, plat,
+                            variant=v, style_seed=style_seed_text,
+                            article_slug=art["name"], temperature=t,
                             no_cache=not use_cache,
                         )
                         if enable_quality:
                             post, _ = review_and_maybe_revise(
-                                cfg,
-                                model,
-                                ex,
-                                post,
+                                cfg, model, ex, post,
                                 style_seed=style_seed_text,
                                 min_score=min_quality_score,
                                 no_cache=not use_cache,
@@ -1447,26 +1482,22 @@ with tab_input:
             except Exception as e:
                 return idx, None, [], e
 
-        results: dict[int, tuple[Extract, list[Post]]] = {}
-        errors: dict[int, Exception] = {}
         try:
-            with ThreadPoolExecutor(max_workers=effective_workers) as pool:
-                futs = [
-                    pool.submit(_work_article, (i, a)) for i, a in enumerate(ss.articles)
-                ]
-                done = 0
-                total = len(futs)
-                for f in as_completed(futs):
-                    idx, ex, posts, err = f.result()
-                    done += 1
-                    progress.progress(done / total, text=f"完成 {done}/{total}")
-                    log_area.info(f"⚙️ 进度 {done}/{total} · 当前完成第 {idx+1} 篇" + (f" ❌ {type(err).__name__}" if err else " ✅"))
-                    if err:
-                        errors[idx] = err
-                    else:
-                        results[idx] = (ex, posts)
+            if use_concurrent:
+                with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                    futs = [pool.submit(_work_article_threaded, (i, a)) for i, a in enumerate(ss.articles)]
+                    done = 0
+                    for f in as_completed(futs):
+                        idx, ex, posts, err = f.result()
+                        done += 1
+                        progress.progress(done / len(futs), text=f"完成 {done}/{len(futs)}")
+                        if err:
+                            errors[idx] = err
+                        else:
+                            results[idx] = (ex, posts)
+            else:
+                _run_single_threaded()
         except Exception as fatal:
-            # ThreadPoolExecutor 本身挂了的兜底 —— 比如 Streamlit 把进程信号传错
             progress.empty()
             st.exception(fatal)
             st.stop()
