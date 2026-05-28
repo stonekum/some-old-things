@@ -369,6 +369,18 @@ PLATFORM_LABELS = {
     "xiaohongshu": "小红书笔记",
 }
 
+# 示例文章：供首次使用者快速试跑，免去自备素材的门槛
+SAMPLE_ARTICLE = {
+    "name": "示例-上海交大开学典礼",
+    "text": (
+        "9 月 1 日，上海交通大学举行 2026 级新生开学典礼。校长在致辞中强调，"
+        "希望同学们坚守'饮水思源、爱国荣校'的精神，在交大度过的四年既要"
+        "夯实专业基础，也要保持对世界的好奇与开放。当天有来自全球 60 多个国家"
+        "的国际新生加入交大大家庭。典礼以全体新生齐唱校歌结束，标志着他们"
+        "正式开启大学生涯。"
+    ),
+}
+
 
 class Extract(BaseModel):
     title_zh: str = ""
@@ -1230,83 +1242,88 @@ with st.sidebar:
             key=f"thinking_toggle_{provider}_{model}",
         )
 
-    # ── 列出后端真实支持的 model ID（用于 SJTU 这种自定义后端排错） ──
-    if st.button("📋 列出该后端支持的模型", use_container_width=True, disabled=not api_key):
-        # OpenAI 兼容协议：POST /chat/completions 对应 GET /models
-        models_url = api_url.rsplit("/chat/completions", 1)[0] + "/models"
-        try:
-            mr = requests.get(
-                models_url,
-                headers={"Authorization": f"Bearer {api_key}"},
-                timeout=15,
-            )
-            if mr.status_code >= 400:
-                st.error(f"❌ `{models_url}` 返回 {mr.status_code}\n\n{mr.text[:500]}")
-            else:
-                payload = mr.json()
-                ids = [m.get("id") for m in payload.get("data", []) if m.get("id")]
-                if ids:
-                    st.success(f"✅ 后端支持 {len(ids)} 个模型：")
-                    st.code("\n".join(ids), language="text")
-                    st.caption(
-                        "把上面任一 model ID 粘到代码里 `PROVIDER_MODELS` 对应 provider 的 `models` 列表里即可。"
-                    )
-                else:
-                    st.warning(f"返回里没找到 model 列表：{payload}")
-        except Exception as e:
-            st.error(f"❌ 拉取模型列表失败：`{type(e).__name__}: {e}`")
-
-    # ── 连接测试：发一个最小请求，绕开缓存，直接验证 API 是不是真的能通 ──
-    if st.button("🔌 测试 API 连接（绕过缓存）", use_container_width=True, disabled=not api_key):
-        with st.spinner(f"正在 ping {urlparse(api_url).netloc} ..."):
+    # ── 诊断工具：列出后端模型 + 测试连接，平时收起避免噪音 ──
+    with st.expander("🔧 诊断工具", expanded=False):
+        if st.button("📋 列出该后端支持的模型", use_container_width=True, disabled=not api_key):
+            # OpenAI 兼容协议：POST /chat/completions 对应 GET /models
+            models_url = api_url.rsplit("/chat/completions", 1)[0] + "/models"
             try:
-                test_resp = llm_chat(
-                    LLMConfig(api_key=api_key, api_url=api_url, timeout=15, retries=1, thinking=thinking_setting),
-                    system="ping",
-                    user="reply with the single word: pong",
-                    model=model,
-                    temperature=0.0,
-                    no_cache=True,  # 关键：绕过缓存
+                mr = requests.get(
+                    models_url,
+                    headers={"Authorization": f"Bearer {api_key}"},
+                    timeout=15,
                 )
-                # 通过响应里有没有 reasoning_content 判断思维链是否激活
-                thinking_active = bool(test_resp.reasoning_content)
-                expect_thinking = (
-                    thinking_setting if thinking_setting is not None
-                    else model == "deepseek-reasoner"
-                )
-                if expect_thinking and thinking_active:
-                    mode_line = "🧠 思维链 ✅ 已激活"
-                elif expect_thinking and not thinking_active:
-                    mode_line = "⚠️ 期望思维链但 reasoning_content 为空（可能后端不支持/未生效）"
-                elif not expect_thinking and thinking_active:
-                    mode_line = "ℹ️ 后端意外开启了思维链"
+                if mr.status_code >= 400:
+                    st.error(f"❌ `{models_url}` 返回 {mr.status_code}\n\n{mr.text[:500]}")
                 else:
-                    mode_line = "💬 非思维链模式"
-                st.success(
-                    f"✅ 连接成功 · `{urlparse(api_url).netloc}`\n\n"
-                    f"{mode_line}\n\n"
-                    f"返回：{test_resp.content[:80]}"
-                )
+                    payload = mr.json()
+                    ids = [m.get("id") for m in payload.get("data", []) if m.get("id")]
+                    if ids:
+                        st.success(f"✅ 后端支持 {len(ids)} 个模型：")
+                        st.code("\n".join(ids), language="text")
+                        st.caption(
+                            "把上面任一 model ID 粘到代码里 `PROVIDER_MODELS` 对应 provider 的 `models` 列表里即可。"
+                        )
+                    else:
+                        st.warning(f"返回里没找到 model 列表：{payload}")
             except Exception as e:
-                st.error(
-                    f"❌ 连接失败 · `{urlparse(api_url).netloc}`\n\n"
-                    f"错误：`{type(e).__name__}: {e}`\n\n"
-                    f"**SJTU 失败**：确认连接了交大 VPN。\n\n"
-                    f"**DeepSeek 失败**：检查 Key 是否在 platform.deepseek.com 仍有效。"
-                )
+                st.error(f"❌ 拉取模型列表失败：`{type(e).__name__}: {e}`")
+
+        # ── 连接测试：发一个最小请求，绕开缓存，直接验证 API 是不是真的能通 ──
+        if st.button("🔌 测试 API 连接（绕过缓存）", use_container_width=True, disabled=not api_key):
+            with st.spinner(f"正在 ping {urlparse(api_url).netloc} ..."):
+                try:
+                    test_resp = llm_chat(
+                        LLMConfig(api_key=api_key, api_url=api_url, timeout=15, retries=1, thinking=thinking_setting),
+                        system="ping",
+                        user="reply with the single word: pong",
+                        model=model,
+                        temperature=0.0,
+                        no_cache=True,  # 关键：绕过缓存
+                    )
+                    # 通过响应里有没有 reasoning_content 判断思维链是否激活
+                    thinking_active = bool(test_resp.reasoning_content)
+                    expect_thinking = (
+                        thinking_setting if thinking_setting is not None
+                        else model == "deepseek-reasoner"
+                    )
+                    if expect_thinking and thinking_active:
+                        mode_line = "🧠 思维链 ✅ 已激活"
+                    elif expect_thinking and not thinking_active:
+                        mode_line = "⚠️ 期望思维链但 reasoning_content 为空（可能后端不支持/未生效）"
+                    elif not expect_thinking and thinking_active:
+                        mode_line = "ℹ️ 后端意外开启了思维链"
+                    else:
+                        mode_line = "💬 非思维链模式"
+                    st.success(
+                        f"✅ 连接成功 · `{urlparse(api_url).netloc}`\n\n"
+                        f"{mode_line}\n\n"
+                        f"返回：{test_resp.content[:80]}"
+                    )
+                except Exception as e:
+                    st.error(
+                        f"❌ 连接失败 · `{urlparse(api_url).netloc}`\n\n"
+                        f"错误：`{type(e).__name__}: {e}`\n\n"
+                        f"**SJTU 失败**：确认连接了交大 VPN。\n\n"
+                        f"**DeepSeek 失败**：检查 Key 是否在 platform.deepseek.com 仍有效。"
+                    )
 
     st.divider()
     platforms_chosen = st.multiselect(
         "目标平台",
         ["instagram", "twitter", "linkedin", "facebook", "wechat", "xiaohongshu"],
-        default=["instagram", "twitter", "linkedin", "xiaohongshu"],
+        # 默认勾选除微信公众号、小红书以外的全部（这两个用户场景独立性较强，按需开启）
+        default=["instagram", "twitter", "linkedin", "facebook"],
         format_func=lambda p: PLATFORM_LABELS.get(p, p),
         help="可多选；不同平台会使用不同长度、语气和格式规则。",
     )
-    st.caption(f"当前将为每篇文章生成 {len(platforms_chosen)} 个平台版本")
     variants = st.slider("每个平台生成几条变体", 1, 3, 1)
-    max_workers = st.slider("并发数", 1, 8, 4, help="LLM 并发调用数")
-    temperature = st.slider("Temperature", 0.0, 1.2, 0.7, 0.1)
+    max_workers = st.slider("并发数", 1, 8, 4, help="LLM 并发调用数（仅 DeepSeek 官方有效；SJTU 强制单线程）")
+    temperature = st.slider(
+        "创意度 (Temperature)",
+        0.0, 1.2, 0.7, 0.1,
+        help="越高越发散有创意，越低越保守循规。\n\n0.7 适合大多数文案；0.3 适合事实型；1.0+ 适合广告 / 口号",
+    )
     st.divider()
     enable_quality = st.checkbox(
         "发布前自动审稿",
@@ -1319,9 +1336,13 @@ with st.sidebar:
         ),
     )
     min_quality_score = st.slider(
-        "重写阈值",
+        "质量门槛",
         50, 95, 80, 5,
-        help="审稿评分低于该值则自动重写一遍。设 95 = 几乎都会重写；设 50 = 只有差的才重写。",
+        help=(
+            "审稿评分 0-100 低于该值则自动重写一遍。\n\n"
+            "**典型分布**：80 是合格线 · 90+ 优秀 · 95+ 罕见。\n\n"
+            "设 50 = 只重写明显差的；设 95 = 几乎都会重写"
+        ),
         disabled=not enable_quality,
     )
     use_cache = st.checkbox("启用磁盘缓存", value=True, help=f"缓存目录：{CACHE_DIR}/")
@@ -1377,6 +1398,13 @@ with tab_input:
                 st.success(f"已加入：{manual_name}（队列共 {len(ss.articles)} 篇）")
             else:
                 st.warning("正文为空")
+        if st.button("📝 加载示例文章", use_container_width=True, help="无需自备素材即可试跑"):
+            ss.articles.append({
+                "name": slugify(SAMPLE_ARTICLE["name"]),
+                "text": SAMPLE_ARTICLE["text"],
+            })
+            st.success(f"已加入示例（队列共 {len(ss.articles)} 篇）")
+            st.rerun()
 
     with col2:
         st.subheader("方式 B：URL 抓取")
