@@ -1234,10 +1234,21 @@ with st.sidebar:
                     temperature=0.0,
                     no_cache=True,  # 关键：绕过缓存
                 )
+                # 判断思维链是否真的激活 —— 看 reasoning_content 是不是非空
+                thinking_active = bool(test_resp.reasoning_content)
+                if model == "deepseek-reasoner":
+                    if thinking_active:
+                        mode_line = "🧠 思维链 ✅ 已激活（R1 模式）"
+                    else:
+                        mode_line = "⚠️ 选了 reasoner 但未返回 reasoning_content（思维链没激活）"
+                elif model == "deepseek-chat":
+                    mode_line = "💬 非思维链（V3 chat 模式）"
+                else:
+                    mode_line = f"🔧 思维链：{'是' if thinking_active else '否'}"
                 st.success(
-                    f"✅ 连接成功 · endpoint `{urlparse(api_url).netloc}`\n\n"
-                    f"实际服务模型：`{test_resp.served_model or '(API 未返回)'}`\n\n"
-                    f"返回内容预览：{test_resp.content[:120]}"
+                    f"✅ 连接成功 · `{urlparse(api_url).netloc}`\n\n"
+                    f"{mode_line}\n\n"
+                    f"返回：{test_resp.content[:80]}"
                 )
             except Exception as e:
                 st.error(
