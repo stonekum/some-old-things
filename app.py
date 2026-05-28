@@ -68,13 +68,47 @@ Rules:
 1. Strip personal names from titles and key sentences. Use the person's role.
 2. emoji_flag is true ONLY when the article mentions a country other than China,
    OR is clearly a lighthearted lifestyle / campus-life piece. Otherwise false.
-3. key_sentences must be drawn from the source; no paraphrase that changes meaning.
-4. Date format YYYY-MM-DD. Vague time ("spring 2025") → null.
-5. Pick a sensible platform subset for this content.
+3. Each key_sentence MUST be evidence-bearing — contain at least ONE of:
+   • a specific number (count / year / percentage / capacity)
+   • a named organization, program, institution, or event
+   • a specific role + action ("the dean signed", "students from 60 countries arrived")
+   • a concrete date or location
+4. REJECT summary lines like：
+   • "展现了交大学子的良好精神风貌"
+   • "充分体现了学校的国际化办学水平"
+   • "彰显了 XX 的实力 / 风采"
+   • "Demonstrates the spirit of XYZ University"
+   • "showcased the achievements of..."
+   Prefer quotable lines from the source.
+5. Date format YYYY-MM-DD. Vague time ("spring 2025") → null.
+6. Pick a sensible platform subset for this content.
 
 SOURCE:
 {source_text}
 """
+
+# 反模式黑名单：所有 platform prompt 都注入，让模型主动绕开 LLM 套话。
+# 实测加上后"We are excited to announce..."这类开头大幅减少。
+BAD_PHRASES_EN = """\
+AVOID these LLM clichés (do not produce text containing them or similar):
+- Openings: "We are excited to announce...", "We are thrilled...", "In a world where...",
+  "Step into / Join us as...", "It is with great pleasure..."
+- Empty intensifiers: "amazing", "incredible", "unforgettable", "stunning", "breathtaking",
+  "inspiring journey", "powerful experience"
+- Vague abstractions: "passionate about...", "dedicated to fostering...",
+  "leaves a lasting impact", "transformative experience", "next generation of leaders"
+- Generic CTAs: "stay tuned!", "join us as we...", "you won't want to miss this!"
+- Closing flourishes: "the future is bright", "the journey continues", "until next time..."
+Use concrete nouns and verbs from the source instead."""
+
+BAD_PHRASES_ZH = """\
+避免下列 AI 套话（不要直接或近似地使用）：
+- 开头模板：「在这个 XX 的时代/季节」「让我们一起来看看」「值此 XX 之际」
+- 形容词堆叠：「精彩纷呈」「璀璨夺目」「意义非凡」「硕果累累」「熠熠生辉」
+- 总结型空话：「展现了 XX 的精神风貌」「彰显了 XX 的实力 / 风采」「树立了榜样」
+- 万能结尾：「未来可期」「让我们共同见证」「让我们拭目以待」「值得期待」
+- 标题党：「震惊！」「太赞了！」「全网都在转」
+使用素材里的具体名词、数字、人物动作来替代。"""
 
 
 GEN_PROMPTS: dict[str, tuple[str, str]] = {
@@ -84,13 +118,15 @@ GEN_PROMPTS: dict[str, tuple[str, str]] = {
         """Write one Instagram caption.
 
 Constraints:
-- Body: 150-220 words, 2-4 short paragraphs separated by blank lines.
-- Open with a vivid hook (image, question, or a number).
+- Body: 80-150 words, 2-3 short paragraphs separated by blank lines.
+- Open with a vivid hook: a concrete image, a question, or a specific number from the facts.
 - Plain text only. No '**', '#', or '>' markdown.
 - End with one call-to-action line.
 - Emoji policy: {emoji_directive}
 - Date: {date_directive}
 - Do NOT invent names, programs, or facts.
+
+{bad_phrases}
 
 Style reference (tone only, do not copy):
 {style_seed}
@@ -114,6 +150,8 @@ Constraints:
 - Tone: punchy, factual, one strong verb.
 - Emoji policy: {emoji_directive}
 - Date: {date_directive}
+
+{bad_phrases}
 
 Facts:
 - Title (EN): {title_en}
@@ -139,6 +177,8 @@ Constraints:
 - Emoji policy: {emoji_directive} (LinkedIn norms: minimal emoji even when allowed).
 - Date: {date_directive}
 
+{bad_phrases}
+
 Style reference:
 {style_seed}
 
@@ -162,6 +202,8 @@ Constraints:
 - Emoji policy: {emoji_directive}
 - Date: {date_directive}
 
+{bad_phrases}
+
 Facts:
 - Title (EN): {title_en}
 - Date: {date}
@@ -178,11 +220,13 @@ JSON: {{"title":"...","body":"..."}}.""",
 
 要求：
 - 正文 220-320 字，3-4 自然段，段间空行。
-- 首段第一句即点题。
+- 首段第一句即点题，用素材里的具体名词/数字开场。
 - 文末用一句行动号召收尾。
 - Emoji 规则：{emoji_directive}
 - 日期：{date_directive}
 - 严格忠于素材，不得新增姓名、事实。
+
+{bad_phrases}
 
 风格参考（仅借鉴语感）：
 {style_seed}
@@ -204,12 +248,14 @@ JSON：{{"title":"...","body":"..."}}。""",
 要求：
 - 标题 12-24 个中文字符，具体、有画面感，不标题党。
 - 正文 180-280 字，3-5 个短段落，段间空行。
-- 开头直接给出场景、人物角色或具体细节。
+- 开头直接给出场景、人物角色或具体细节，不要总结性开场。
 - 语气自然，适合高校国际传播账号；不要使用夸张营销词。
 - 可在文末加入 3-5 个相关话题标签。
 - Emoji 规则：{emoji_directive}
 - 日期：{date_directive}
 - 严格忠于素材，不得新增姓名、奖项、机构、未出现的事实。
+
+{bad_phrases}
 
 风格参考（仅借鉴语感与节奏，不可照抄）：
 {style_seed}
@@ -231,21 +277,34 @@ Review the draft against the source facts and platform norms. Output ONLY a JSON
 object. No markdown fences, no prose."""
 
 QUALITY_REVIEW_USER = """\
-Review this generated post.
+Review this generated {platform} post.
 
 Score it from 0 to 100 using these criteria:
 - factuality: no invented names, programs, awards, dates, numbers, or claims.
-- platform_fit: matches the conventions and reader expectations of {platform}.
+- platform_fit: matches the conventions of {platform} (see norms below).
 - style_fit: professional university voice; warm, concrete, not hype-heavy.
 - clarity: clear, idiomatic, easy to understand.
 - engagement: hook, rhythm, specificity, and call-to-action fit the platform.
 - constraints: respects length, emoji, hashtag, date, and plain-text rules.
 
+Scoring anchors (use these as calibration — NOT just gut feeling):
+- 90-100: publishable as-is; reads like a polished human draft from this account.
+- 80-89: solid; minor edits only (one phrase, one CTA, one hashtag swap).
+- 70-79: structurally correct but bland, wordy, or relies on filler. Needs rewriting for liveliness.
+- 60-69: relies on AI clichés or vague summary lines; misses one key constraint (length/format/CTA).
+- 50-59: drifts from source facts OR breaks platform format meaningfully.
+- below 50: invented facts, wrong language, or unusable as-is.
+
+Platform norms for {platform}:
+{platform_norms}
+
 Rules:
-1. Be strict about factuality. Any invented fact is a high-severity issue.
-2. Prefer concise, actionable comments over broad taste judgments.
-3. Mark publishable true only if the post can be used with minor or no edits.
-4. Set needs_rewrite true when score is below 80, publishable is false, or any high-severity issue exists.
+1. Be strict about factuality. Any invented fact is a high-severity issue and caps score at 55.
+2. Watch for AI clichés ("amazing journey", "we are excited", "展现了 XX 风采", "未来可期"). These are
+   automatically style_fit or engagement issues, severity medium minimum.
+3. Prefer concise, actionable comments over broad taste judgments.
+4. Mark publishable true only if the post can be used with minor or no edits.
+5. Set needs_rewrite true when score is below 80, publishable is false, or any high-severity issue exists.
 
 Article facts:
 {article_facts}
@@ -274,6 +333,16 @@ Return JSON:
   ],
   "strengths": ["specific strength"]
 }}"""
+
+# 各平台的硬指标，注入审稿 prompt 让审稿员对照"规范"打分，而不是脑补
+PLATFORM_NORMS_FOR_REVIEW = {
+    "instagram":   "80-150 words; 2-3 short paragraphs separated by blank lines; vivid concrete hook; one CTA at end; plain text (no markdown like **, #, >).",
+    "twitter":     "Single paragraph, STRICTLY under 270 characters total including 2-3 CamelCase hashtags; one strong verb; punchy and factual.",
+    "linkedin":    "220-320 words, 3-5 paragraphs; opens with concrete subject; ONE specific number from source must appear; ends with reflective question + 3-5 hashtags on last line; minimal emoji.",
+    "facebook":    "180-260 words, 3-4 paragraphs; narrative voice (small story → takeaway); ends with open question.",
+    "wechat":      "中文 220-320 字；3-4 自然段段间空行；首段第一句即点题（用具体名词/数字）；文末用一句行动号召收尾；忠于素材不新增姓名/事实。",
+    "xiaohongshu": "中文标题 12-24 字（有画面感不标题党）；正文 180-280 字 / 3-5 短段；开头用具体场景或细节而非总结；3-5 个相关话题标签；不新增姓名/奖项/机构。",
+}
 
 QUALITY_REVISE_SYSTEM = """\
 You are a senior bilingual social media editor for a university communications team.
@@ -750,7 +819,11 @@ def _date_directive(ex: Extract) -> str:
     return f"include the date {ex.date} naturally" if ex.date else "do not reference any date"
 
 
-def _format_gen_user(template: str, ex: Extract, style_seed: str) -> str:
+_CHINESE_PLATFORMS = {"wechat", "xiaohongshu"}
+
+
+def _format_gen_user(template: str, ex: Extract, style_seed: str, platform: str = "") -> str:
+    bad = BAD_PHRASES_ZH if platform in _CHINESE_PLATFORMS else BAD_PHRASES_EN
     return (
         template.replace("{title_zh}", ex.title_zh)
         .replace("{title_en}", ex.title_en)
@@ -761,6 +834,7 @@ def _format_gen_user(template: str, ex: Extract, style_seed: str) -> str:
         .replace("{emoji_directive}", _emoji_directive(ex))
         .replace("{date_directive}", _date_directive(ex))
         .replace("{style_seed}", style_seed or "(no style reference)")
+        .replace("{bad_phrases}", bad)
     )
 
 
@@ -777,7 +851,7 @@ def generate_post(
     no_cache: bool = False,
 ) -> Post:
     sys_prompt, user_tmpl = GEN_PROMPTS[platform]
-    user = _format_gen_user(user_tmpl, ex, style_seed)
+    user = _format_gen_user(user_tmpl, ex, style_seed, platform=platform)
     payload, resp = llm_call_validated(
         cfg,
         _PostJSON,
@@ -848,6 +922,7 @@ def review_post(
 ) -> QualityReview:
     user = (
         QUALITY_REVIEW_USER.replace("{platform}", post.platform)
+        .replace("{platform_norms}", PLATFORM_NORMS_FOR_REVIEW.get(post.platform, "(no norms registered)"))
         .replace("{title}", post.title)
         .replace("{body}", post.body)
         .replace("{article_facts}", _quality_facts(ex))
