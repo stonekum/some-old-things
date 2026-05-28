@@ -1249,70 +1249,7 @@ if not _check_app_password():
     st.stop()
 
 
-st.markdown(
-    """
-<style>
-    .stApp {background:#f5f6f8;}
-    .sjtu-hero {
-        position: relative;
-        border-radius: 12px;
-        overflow: hidden;
-        min-height: 260px;
-        margin-bottom: 16px;
-        background:
-            linear-gradient(90deg, rgba(41,76,128,0.78), rgba(76,127,190,0.42)),
-            url("https://global.sjtu.edu.cn/resource/images/about-banner.jpg") center/cover no-repeat;
-        color: #fff;
-        padding: 36px 42px;
-    }
-    .sjtu-hero h1 {margin: 0 0 12px 0; font-size: 48px; font-weight: 700; letter-spacing: 1px;}
-    .sjtu-hero .crumb {opacity: 0.9; font-size: 14px;}
-    .sjtu-nav {
-        margin-top: -28px;
-        margin-bottom: 20px;
-        display: flex;
-        justify-content: center;
-    }
-    .sjtu-nav-inner {
-        background: #fff;
-        border-radius: 2px;
-        display: grid;
-        grid-template-columns: repeat(3, minmax(160px, 220px));
-        box-shadow: 0 8px 22px rgba(0,0,0,0.08);
-        overflow: hidden;
-    }
-    .sjtu-tab {
-        text-align: center;
-        padding: 18px 10px;
-        font-size: 26px;
-        color: #c73a32;
-        background: #c51f1f;
-        font-weight: 700;
-    }
-    .sjtu-tab-sub {display:block; font-size:28px; opacity:0.22; margin-top:-8px; line-height:1;}
-    .sjtu-tab-plain {
-        text-align: center;
-        padding: 24px 10px;
-        font-size: 30px;
-        color: #222;
-        background: #fff;
-        font-weight: 500;
-    }
-</style>
-<div class="sjtu-hero">
-  <h1>关于我们</h1>
-  <div class="crumb">首页 / 关于我们 / 部门简介</div>
-</div>
-<div class="sjtu-nav">
-  <div class="sjtu-nav-inner">
-    <div class="sjtu-tab">部门简介<span class="sjtu-tab-sub">01</span></div>
-    <div class="sjtu-tab-plain">组织机构</div>
-    <div class="sjtu-tab-plain">联系我们</div>
-  </div>
-</div>
-""",
-    unsafe_allow_html=True,
-)
+st.title("✍️ 中→英 社交文案生成工作流")
 st.caption("一站式：抓取 / 提取双语关键信息 / 按平台批量生成")
 
 # ---------- Sidebar ----------
