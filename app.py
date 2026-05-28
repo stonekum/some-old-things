@@ -314,21 +314,13 @@ PROMPT_VERSION   = "v1"
 # 各提供商的可用模型及说明
 PROVIDER_MODELS = {
     "DeepSeek 官方": {
-        # 按 V4 命名直接走新模型 ID。旧 alias deepseek-chat / deepseek-reasoner
-        # 2026-07-24 15:59 UTC 退役（已通过 DeepSeek API Docs 确认）。
-        # 思维链由 sidebar 的 "启用思维链" 单独控制，不再隐含在模型名里。
-        "models": [
-            "deepseek-v4-flash",
-            "deepseek-v4-pro",
-            "deepseek-chat",        # legacy alias
-            "deepseek-reasoner",    # legacy alias
-        ],
+        # 只暴露 V4 新命名；旧 alias deepseek-chat / deepseek-reasoner 2026-07-24 退役，不再列。
+        # 思维链由 sidebar 的"启用思维链"checkbox 显式控制。
+        "models": ["deepseek-v4-flash", "deepseek-v4-pro"],
         "default": "deepseek-v4-flash",
         "help": {
             "deepseek-v4-flash": "DeepSeek V4 Flash · 284B 总参 / 13B 激活 · 速度快、费用低 ✅ 推荐",
             "deepseek-v4-pro":   "DeepSeek V4 Pro · 1.6T 总参 / 49B 激活 · 复杂推理 / Agent / 代码任务",
-            "deepseek-chat":     "[兼容旧 alias] 等价于 v4-flash 非思维链 · 2026-07-24 退役",
-            "deepseek-reasoner": "[兼容旧 alias] 等价于 v4-flash 思维链   · 2026-07-24 退役",
         },
     },
     "交大内网 (SJTU)": {
