@@ -1,5 +1,8 @@
 # legacy/
 
+> ⚠️ **不再维护、不会运行**：本目录保存的是项目重构前的原始脚本，仅作历史参考。
+> 实际工作流见 `app.py`（Streamlit 单文件）和 `src/copy_workflow/`（Python 包 + CLI）。
+
 The original loose scripts from the previous workflow, kept for reference.
 The functionality in these files is now provided by the `copy_workflow` package
 (see the parent `README.md`).
