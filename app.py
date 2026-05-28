@@ -1182,17 +1182,7 @@ with st.sidebar:
         api_key = server_key
         st.success(f"✅ {key_label} 已由服务端配置加载")
     else:
-        api_key = st.text_input(
-            key_label,
-            type="password",
-            help=(
-                f"未在服务端配置 `{env_name}`，仅本次会话有效（不会写到磁盘）。\n\n"
-                f"**生产部署建议**：在 Streamlit Secrets / 环境变量里设 `{env_name}`，"
-                "Sidebar 就完全看不到这个输入框。"
-            ),
-        )
-        if provider == "交大内网 (SJTU)" and not api_key:
-            st.info("💡 领取地址：https://my.sjtu.edu.cn/ → APP → API")
+        api_key = st.text_input(key_label, type="password")
 
     # ── 模型选择 ──
     model_list = prov_cfg["models"]
@@ -1204,10 +1194,6 @@ with st.sidebar:
         index=model_list.index(prov_cfg["default"]),
         key=f"model_select_{provider}",
         help=model_help,
-    )
-    st.caption(
-        "⚠️ DeepSeek 的 model 名是 **alias**：`deepseek-chat` 后端实际跑 V4 Flash，"
-        "`deepseek-reasoner` 实际跑 R1 思维链版。处理完毕后结果区会显示真实模型名。"
     )
 
     # ── 列出后端真实支持的 model ID（用于 SJTU 这种自定义后端排错） ──
@@ -1390,11 +1376,6 @@ with tab_input:
             st.rerun()
 
     st.divider()
-    if estimated_posts:
-        st.caption(
-            f"将生成 {estimated_posts} 条文案：{len(ss.articles)} 篇文章 × "
-            f"{len(platforms_chosen)} 个平台 × {variants} 个变体。"
-        )
     if st.button(
         f"🚀 开始生成 {estimated_posts or ''} 条文案",
         type="primary",
@@ -1407,13 +1388,8 @@ with tab_input:
         # 估算总步骤数 = 篇数 × (1 extract + 平台数 × 变体数 × (1 generate + 质量审核 0~2 次))
         steps_per_article = 1 + len(platforms_chosen) * variants * (3 if enable_quality else 1)
         total_steps = len(ss.articles) * steps_per_article
-        progress = st.progress(0.0, text=f"准备 · 预计 {total_steps} 次 LLM 调用")
+        progress = st.progress(0.0, text="准备…")
         log_area = st.empty()
-        log_area.info(
-            f"⚙️ 后端 `{urlparse(api_url).netloc}` · "
-            f"{'并发 ' + str(max_workers) + ' 路' if use_concurrent else '单线程'} · "
-            f"timeout={cfg.timeout}s · retries={cfg.retries} · 预计 {total_steps} 次调用"
-        )
 
         results: dict[int, tuple[Extract, list[Post]]] = {}
         errors: dict[int, Exception] = {}
@@ -1642,23 +1618,12 @@ with tab_logs:
     c2.metric("累计输出 tokens", ss.total_tokens_out)
     c3.metric("已处理文章数", sum(1 for a in ss.articles if "posts" in a))
     st.info(f"当前提供商：**{provider}** ｜ 模型：`{model}` ｜ API：`{api_url}`")
-    st.caption(
-        "提示：磁盘缓存按 sha256(prompt+model+...) 命中；如要强制重新生成，去掉左侧「启用磁盘缓存」并重跑。"
-    )
-    col_a, col_b = st.columns(2)
-    with col_a:
-        if st.button("🧨 清空磁盘缓存", use_container_width=True):
-            import shutil
-            if os.path.exists(CACHE_DIR):
-                shutil.rmtree(CACHE_DIR)
-            st.success(f"已清空 {CACHE_DIR}/")
-    with col_b:
-        if st.button("🗑 清空所有结果（不删队列）", use_container_width=True):
-            # 切换模型后旧 Post 仍残留在 session_state，这个按钮把它们全部清掉
-            for a in ss.articles:
-                a.pop("extract", None)
-                a.pop("posts", None)
-            ss.total_tokens_in = 0
-            ss.total_tokens_out = 0
-            st.success("已清空所有处理结果，下次点「开始处理」会全部重新生成")
-            st.rerun()
+    if st.button("🗑 清空所有结果（不删队列）", use_container_width=True):
+        # 切换模型后旧 Post 仍残留在 session_state，这个按钮把它们全部清掉
+        for a in ss.articles:
+            a.pop("extract", None)
+            a.pop("posts", None)
+        ss.total_tokens_in = 0
+        ss.total_tokens_out = 0
+        st.success("已清空所有处理结果，下次点「开始处理」会全部重新生成")
+        st.rerun()
