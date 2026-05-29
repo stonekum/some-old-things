@@ -1820,6 +1820,50 @@ with tab_input:
             ss.articles.append({"name": slugify(os.path.splitext(f.name)[0]), "text": text})
         st.success(f"已加入 {len(uploads)} 篇")
 
+    # ── 方式 D：上传视频 / 音频 ──
+    # ASR 后端由 video_input.get_default_transcriber() 决定；当前 = stub 占位。
+    # 这部分逻辑解耦：UI / pipeline 不感知 ASR backend，换后端只动 video_input.py。
+    from video_input import get_default_transcriber, validate_upload
+    st.subheader("方式 D：上传视频 / 音频（实验功能）")
+    st.caption(
+        "🚧 当前 ASR 走的是占位实现，会返回示例文本——主要用来验证上传 → 转文本 → 文案的整条链路。"
+        "真实 ASR 后端待定，详见 `docs/video-input-status.md`。"
+    )
+    media_upload = st.file_uploader(
+        "支持 .mp4 / .mov / .m4v / .mp3 / .wav / .m4a · 单文件 ≤ 50MB",
+        type=["mp4", "mov", "m4v", "mp3", "wav", "m4a"],
+        accept_multiple_files=False,
+        key="video_uploader",
+    )
+    if media_upload and st.button("🎬 转文本并加入队列", use_container_width=True):
+        ok, err = validate_upload(media_upload.name, media_upload.size)
+        if not ok:
+            st.error(f"❌ {err}")
+        else:
+            transcriber = get_default_transcriber()
+            with st.spinner(f"🎙️ {transcriber.name} 转录中…"):
+                try:
+                    result = transcriber.transcribe(
+                        media_upload.getvalue(),
+                        media_upload.name,
+                        media_upload.type,
+                    )
+                except Exception as e:
+                    st.error(f"❌ 转录失败：`{type(e).__name__}: {e}`")
+                    result = None
+            if result is not None:
+                if result.is_placeholder:
+                    st.warning(result.notes)
+                else:
+                    st.success(f"✅ 由 `{result.backend}` 转录完成")
+                ss.articles.append({
+                    "name": slugify(os.path.splitext(media_upload.name)[0]) or "media",
+                    "text": result.text,
+                    "source_type": "media",
+                    "asr_backend": result.backend,
+                })
+                st.info(f"📥 已加入队列（共 {len(ss.articles)} 篇）。可在下方预览并编辑文本后再点开始生成。")
+
     st.divider()
     st.subheader(f"📚 当前队列（{len(ss.articles)} 篇）")
     if ss.articles:
