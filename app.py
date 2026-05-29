@@ -1249,71 +1249,69 @@ if not _check_app_password():
     st.stop()
 
 
+# ---------- 页面视觉（中国大学门户风格） ----------
 st.markdown(
     """
-<style>
-    .stApp {background:#f5f6f8;}
-    .sjtu-hero {
-        position: relative;
-        border-radius: 12px;
-        overflow: hidden;
-        min-height: 260px;
-        margin-bottom: 16px;
-        background:
-            linear-gradient(90deg, rgba(41,76,128,0.78), rgba(76,127,190,0.42)),
-            url("https://global.sjtu.edu.cn/resource/images/about-banner.jpg") center/cover no-repeat;
-        color: #fff;
-        padding: 36px 42px;
+    <style>
+    :root {
+      --sjtu-red: #982E3A;
+      --sjtu-red-deep: #7E2430;
+      --portal-ink: #1f2d3d;
+      --portal-border: #d8dee6;
+      --portal-bg: #f5f7fa;
     }
-    .sjtu-hero h1 {margin: 0 0 12px 0; font-size: 48px; font-weight: 700; letter-spacing: 1px;}
-    .sjtu-hero .crumb {opacity: 0.9; font-size: 14px;}
-    .sjtu-nav {
-        margin-top: -28px;
-        margin-bottom: 20px;
-        display: flex;
-        justify-content: center;
+    .stApp { background: var(--portal-bg); }
+    .portal-header {
+      background: linear-gradient(90deg, var(--sjtu-red) 0%, var(--sjtu-red-deep) 100%);
+      border: 1px solid #7b2631;
+      border-radius: 8px;
+      color: #fff;
+      padding: 14px 18px;
+      margin-bottom: 10px;
+      box-shadow: 0 1px 3px rgba(0,0,0,.08);
     }
-    .sjtu-nav-inner {
-        background: #fff;
-        border-radius: 2px;
-        display: grid;
-        grid-template-columns: repeat(3, minmax(160px, 220px));
-        box-shadow: 0 8px 22px rgba(0,0,0,0.08);
-        overflow: hidden;
+    .portal-header h1 { margin: 0; font-size: 1.35rem; letter-spacing: .5px; }
+    .portal-header p { margin: 4px 0 0; opacity: .95; font-size: .92rem; }
+    .portal-nav {
+      background: #fff;
+      border: 1px solid var(--portal-border);
+      border-radius: 6px;
+      padding: 8px 12px;
+      margin-bottom: 14px;
+      color: var(--portal-ink);
+      font-size: .92rem;
     }
-    .sjtu-tab {
-        text-align: center;
-        padding: 18px 10px;
-        font-size: 26px;
-        color: #c73a32;
-        background: #c51f1f;
-        font-weight: 700;
+    .portal-nav span { margin-right: 18px; font-weight: 600; }
+    .portal-notice {
+      background: #fff;
+      border-left: 4px solid var(--sjtu-red);
+      border-top: 1px solid var(--portal-border);
+      border-right: 1px solid var(--portal-border);
+      border-bottom: 1px solid var(--portal-border);
+      border-radius: 4px;
+      padding: 10px 12px;
+      margin: 6px 0 14px;
+      color: #223;
+      font-size: .9rem;
     }
-    .sjtu-tab-sub {display:block; font-size:28px; opacity:0.22; margin-top:-8px; line-height:1;}
-    .sjtu-tab-plain {
-        text-align: center;
-        padding: 24px 10px;
-        font-size: 30px;
-        color: #222;
-        background: #fff;
-        font-weight: 500;
-    }
-</style>
-<div class="sjtu-hero">
-  <h1>关于我们</h1>
-  <div class="crumb">首页 / 关于我们 / 部门简介</div>
-</div>
-<div class="sjtu-nav">
-  <div class="sjtu-nav-inner">
-    <div class="sjtu-tab">部门简介<span class="sjtu-tab-sub">01</span></div>
-    <div class="sjtu-tab-plain">组织机构</div>
-    <div class="sjtu-tab-plain">联系我们</div>
-  </div>
-</div>
-""",
+    </style>
+    """,
     unsafe_allow_html=True,
 )
-st.caption("一站式：抓取 / 提取双语关键信息 / 按平台批量生成")
+
+st.markdown(
+    """
+    <div class="portal-header">
+      <h1>上海交通大学 · 国际传播文案工作台</h1>
+      <p>党委宣传部（示例）｜校园新闻国际传播辅助系统</p>
+    </div>
+    <div class="portal-nav">
+      <span>首页</span><span>通知公告</span><span>素材采编</span><span>多平台发布</span><span>统计与归档</span>
+    </div>
+    <div class="portal-notice">【系统公告】本系统用于校园新闻内容提炼与多平台文案生成，请严格遵守事实性与版权规范。</div>
+    """,
+    unsafe_allow_html=True,
+)
 
 # ---------- Sidebar ----------
 with st.sidebar:
@@ -1519,7 +1517,7 @@ else:
     st.info(f"已准备好生成 {estimated_posts} 条文案{quality_note}。")
 
 # ---------- 输入区 ----------
-tab_input, tab_results, tab_logs = st.tabs(["1️⃣ 输入素材", "2️⃣ 结果", "📊 用量"])
+tab_input, tab_results, tab_logs = st.tabs(["🏫 首页与素材", "📝 生成结果", "📊 用量统计"])
 
 with tab_input:
     col1, col2 = st.columns(2)
