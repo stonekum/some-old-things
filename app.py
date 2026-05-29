@@ -110,6 +110,21 @@ BAD_PHRASES_ZH = """\
 - 标题党：「震惊！」「太赞了！」「全网都在转」
 使用素材里的具体名词、数字、人物动作来替代。"""
 
+# 句末去句号约束 — 用户口味要求；下游还会有 _strip_trailing_sentence_punct 兜底。
+NO_TERMINAL_PERIOD_EN = """\
+PUNCTUATION RULE (strict):
+- Do NOT end any sentence, paragraph, or list item with a period (.).
+- Simply drop the trailing period — do not substitute another mark.
+- Commas, em dashes, colons, and question marks in mid-sentence are fine.
+- This rule applies to every line of body text, including the CTA / closing line."""
+
+NO_TERMINAL_PERIOD_ZH = """\
+标点规则（严格）：
+- 每个句子、段落、列表项的结尾**都不要使用句号「。」**。
+- 直接去掉结尾的句号即可，不要换成其他标点。
+- 句中的逗号、破折号、冒号、问号都没问题。
+- 这一规则适用于正文每一行，包括行动号召 / 结尾句。"""
+
 
 GEN_PROMPTS: dict[str, tuple[str, str]] = {
     "instagram": (
@@ -118,13 +133,18 @@ GEN_PROMPTS: dict[str, tuple[str, str]] = {
         """Write one Instagram caption.
 
 Constraints:
-- Body: 80-150 words, 2-3 short paragraphs separated by blank lines.
+- Body: 80-150 words (excluding hashtags), 2-3 short paragraphs separated by blank lines.
 - Open with a vivid hook: a concrete image, a question, or a specific number from the facts.
-- Plain text only. No '**', '#', or '>' markdown.
+- Plain text only. No '**' or '>' markdown.
 - End with one call-to-action line.
+- On the line AFTER the CTA, output 5-8 relevant hashtags in CamelCase, space-separated,
+  no commas. Mix one broad tag (e.g. #StudentLife) with topic-specific ones
+  (e.g. #SJTU2026, #CampusStories). Hashtags do NOT count toward word limit.
 - Emoji policy: {emoji_directive}
 - Date: {date_directive}
 - Do NOT invent names, programs, or facts.
+
+{period_rule}
 
 {bad_phrases}
 
@@ -150,6 +170,8 @@ Constraints:
 - Tone: punchy, factual, one strong verb.
 - Emoji policy: {emoji_directive}
 - Date: {date_directive}
+
+{period_rule}
 
 {bad_phrases}
 
@@ -177,6 +199,8 @@ Constraints:
 - Emoji policy: {emoji_directive} (LinkedIn norms: minimal emoji even when allowed).
 - Date: {date_directive}
 
+{period_rule}
+
 {bad_phrases}
 
 Style reference:
@@ -202,6 +226,8 @@ Constraints:
 - Emoji policy: {emoji_directive}
 - Date: {date_directive}
 
+{period_rule}
+
 {bad_phrases}
 
 Facts:
@@ -225,6 +251,8 @@ JSON: {{"title":"...","body":"..."}}.""",
 - Emoji 规则：{emoji_directive}
 - 日期：{date_directive}
 - 严格忠于素材，不得新增姓名、事实。
+
+{period_rule}
 
 {bad_phrases}
 
@@ -254,6 +282,8 @@ JSON：{{"title":"...","body":"..."}}。""",
 - Emoji 规则：{emoji_directive}
 - 日期：{date_directive}
 - 严格忠于素材，不得新增姓名、奖项、机构、未出现的事实。
+
+{period_rule}
 
 {bad_phrases}
 
@@ -358,6 +388,8 @@ Non-negotiable rules:
 3. Keep the university voice concrete, warm, and restrained.
 4. Address the review comments directly.
 5. Plain text only.
+6. PUNCTUATION: Do NOT end any sentence, paragraph, or list item with a period (.) or 「。」.
+   Drop the trailing terminator; do NOT substitute another mark.
 
 Article facts:
 {article_facts}
@@ -823,7 +855,9 @@ _CHINESE_PLATFORMS = {"wechat", "xiaohongshu"}
 
 
 def _format_gen_user(template: str, ex: Extract, style_seed: str, platform: str = "") -> str:
-    bad = BAD_PHRASES_ZH if platform in _CHINESE_PLATFORMS else BAD_PHRASES_EN
+    is_zh = platform in _CHINESE_PLATFORMS
+    bad = BAD_PHRASES_ZH if is_zh else BAD_PHRASES_EN
+    period_rule = NO_TERMINAL_PERIOD_ZH if is_zh else NO_TERMINAL_PERIOD_EN
     return (
         template.replace("{title_zh}", ex.title_zh)
         .replace("{title_en}", ex.title_en)
@@ -835,7 +869,30 @@ def _format_gen_user(template: str, ex: Extract, style_seed: str, platform: str 
         .replace("{date_directive}", _date_directive(ex))
         .replace("{style_seed}", style_seed or "(no style reference)")
         .replace("{bad_phrases}", bad)
+        .replace("{period_rule}", period_rule)
     )
+
+
+# 后处理兜底：哪怕 prompt 漏掉、模型抗指令，也保证输出不带句末句号。
+# 只剥行末的句号 / 中文句号；保留句中标点、问号、感叹号、省略号、hashtag 行等。
+_TRAILING_PERIOD_RE = re.compile(r"[.。]+(?=\s*$)")
+
+
+def _strip_trailing_periods(body: str) -> str:
+    """逐行去掉行末连续的 '.' 或 '。'，hashtag 行/纯空行原样保留。"""
+    lines = body.split("\n")
+    cleaned: list[str] = []
+    for line in lines:
+        stripped = line.rstrip()
+        if not stripped:
+            cleaned.append(line)
+            continue
+        # 不动 hashtag 行（IG / LinkedIn / 小红书的标签行通常不应有句号，但顺便保持原样）
+        if stripped.lstrip().startswith("#"):
+            cleaned.append(line)
+            continue
+        cleaned.append(_TRAILING_PERIOD_RE.sub("", stripped))
+    return "\n".join(cleaned)
 
 
 def generate_post(
@@ -866,7 +923,7 @@ def generate_post(
         platform=platform,
         variant=variant,
         title=payload.title,
-        body=payload.body,
+        body=_strip_trailing_periods(payload.body),
         model=model,
         served_model=resp.served_model,
         api_url=cfg.api_url,
@@ -975,7 +1032,7 @@ def revise_post(
         no_cache=no_cache,
     )
     post.title = payload.title
-    post.body = payload.body
+    post.body = _strip_trailing_periods(payload.body)
     post.prompt_tokens += resp.prompt_tokens
     post.completion_tokens += resp.completion_tokens
     return _post_with_quality(post, review)
@@ -1208,6 +1265,45 @@ def zip_posts(posts: list[Post]) -> bytes:
     return buf.getvalue()
 
 
+# ── Word (.docx) 导出 ────────────────────────────────────────────────────────
+# 正文字体强制 Times New Roman（用户要求），CJK 部分用 SimSun 兼容
+# Word 默认渲染。段落按空行切分；标题独立段落，比正文略大。
+def post_to_docx(post: Post) -> bytes:
+    """生成单条 Post 的 .docx，正文 Times New Roman 12pt，标题 16pt 加粗。"""
+    from docx import Document
+    from docx.oxml.ns import qn
+    from docx.shared import Pt
+
+    doc = Document()
+
+    # 设默认样式：Times New Roman + 中文 fallback
+    style = doc.styles["Normal"]
+    style.font.name = "Times New Roman"
+    style.font.size = Pt(12)
+    # python-docx 要手动设置东亚字体（rFonts 的 eastAsia 属性）
+    style.element.rPr.rFonts.set(qn("w:eastAsia"), "SimSun")
+
+    # 标题段
+    title_para = doc.add_paragraph()
+    title_run = title_para.add_run(post.title or "")
+    title_run.bold = True
+    title_run.font.name = "Times New Roman"
+    title_run.font.size = Pt(16)
+    title_run._element.rPr.rFonts.set(qn("w:eastAsia"), "SimSun")
+
+    # 正文按空行分段
+    for chunk in [c.strip() for c in (post.body or "").split("\n\n") if c.strip()]:
+        para = doc.add_paragraph()
+        run = para.add_run(chunk)
+        run.font.name = "Times New Roman"
+        run.font.size = Pt(12)
+        run._element.rPr.rFonts.set(qn("w:eastAsia"), "SimSun")
+
+    buf = io.BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
+
+
 # ============================================================================
 # 8. Streamlit UI
 # ============================================================================
@@ -1249,66 +1345,217 @@ if not _check_app_password():
     st.stop()
 
 
-# ---------- 页面视觉（中国大学门户风格） ----------
-st.markdown(
-    """
-    <style>
-    :root {
-      --sjtu-red: #982E3A;
-      --sjtu-red-deep: #7E2430;
-      --portal-ink: #1f2d3d;
-      --portal-border: #d8dee6;
-      --portal-bg: #f5f7fa;
-    }
-    .stApp { background: var(--portal-bg); }
-    .portal-header {
-      background: linear-gradient(90deg, var(--sjtu-red) 0%, var(--sjtu-red-deep) 100%);
-      border: 1px solid #7b2631;
-      border-radius: 8px;
-      color: #fff;
-      padding: 14px 18px;
-      margin-bottom: 10px;
-      box-shadow: 0 1px 3px rgba(0,0,0,.08);
-    }
-    .portal-header h1 { margin: 0; font-size: 1.35rem; letter-spacing: .5px; }
-    .portal-header p { margin: 4px 0 0; opacity: .95; font-size: .92rem; }
-    .portal-nav {
-      background: #fff;
-      border: 1px solid var(--portal-border);
-      border-radius: 6px;
-      padding: 8px 12px;
-      margin-bottom: 14px;
-      color: var(--portal-ink);
-      font-size: .92rem;
-    }
-    .portal-nav span { margin-right: 18px; font-weight: 600; }
-    .portal-notice {
-      background: #fff;
-      border-left: 4px solid var(--sjtu-red);
-      border-top: 1px solid var(--portal-border);
-      border-right: 1px solid var(--portal-border);
-      border-bottom: 1px solid var(--portal-border);
-      border-radius: 4px;
-      padding: 10px 12px;
-      margin: 6px 0 14px;
-      color: #223;
-      font-size: .9rem;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+# ---------- 页面视觉（活字工坊 / Letter Press 编辑式） ----------
+#
+# 设计意图：
+# - 抛弃门户网站红条 / banner 套路
+# - 工具本质是编辑工作台 → 借鉴书刊排版（衬线字 + 暖纸背景 + 双横线 + 章节标号）
+# - Fraunces (Latin) + Noto Serif SC (CJK) 配 EB Garamond 正文
+# - 朱砂红只在分隔线和重要标签上出现，不做大面积渲染
+_TODAY_LABEL = datetime.now().strftime("%Y · %m · %d")
 
 st.markdown(
-    """
-    <div class="portal-header">
-      <h1>上海交通大学 · 国际传播文案工作台</h1>
-      <p>党委宣传部（示例）｜校园新闻国际传播辅助系统</p>
+    f"""
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,300;9..144,500;9..144,700;9..144,900&family=EB+Garamond:wght@400;500;600&family=Noto+Serif+SC:wght@400;500;700;900&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+
+    <style>
+    :root {{
+      --paper:        #F5F0E6;
+      --paper-soft:   #FBF8F1;
+      --ink:          #1A1714;
+      --ink-mute:     #5C5246;
+      --rule:         #2A2520;
+      --vermilion:    #9B2226;
+      --vermilion-soft:#C7464A;
+      --margin-grey:  #6B6354;
+      --display:  'Fraunces', 'Noto Serif SC', serif;
+      --body:     'EB Garamond', 'Noto Serif SC', Georgia, serif;
+      --mono:     'JetBrains Mono', 'IBM Plex Mono', ui-monospace, monospace;
+    }}
+
+    /* 全局基底 */
+    .stApp {{
+      background:
+        radial-gradient(1200px 600px at 90% -10%, rgba(155,34,38,.04) 0%, transparent 60%),
+        radial-gradient(800px 500px at -10% 110%, rgba(26,23,20,.05) 0%, transparent 55%),
+        var(--paper);
+      color: var(--ink);
+    }}
+    .stApp, .stApp p, .stApp div, .stApp span, .stApp label {{
+      font-family: var(--body);
+    }}
+    h1, h2, h3, h4 {{ font-family: var(--display); color: var(--ink); letter-spacing: -0.01em; }}
+    h3 {{ font-weight: 500; font-style: italic; }}
+
+    /* 刊头 */
+    .lp-masthead {{
+      margin: 4px 0 24px;
+      padding: 0;
+    }}
+    .lp-meta-row {{
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      color: var(--margin-grey);
+      padding-bottom: 8px;
+      border-bottom: 1px solid var(--rule);
+    }}
+    .lp-meta-row .left {{ display: flex; gap: 26px; }}
+    .lp-meta-row .accent {{ color: var(--vermilion); font-weight: 500; }}
+    .lp-title-row {{
+      display: grid;
+      grid-template-columns: 1fr auto;
+      align-items: end;
+      gap: 24px;
+      padding: 26px 0 22px;
+      border-bottom: 3px double var(--rule);
+    }}
+    .lp-title {{
+      font-family: var(--display);
+      font-size: clamp(40px, 5.4vw, 68px);
+      font-weight: 900;
+      line-height: 0.92;
+      letter-spacing: -0.025em;
+      margin: 0;
+    }}
+    .lp-title .cn {{
+      display: block;
+      font-family: 'Noto Serif SC', serif;
+      font-weight: 900;
+      font-size: 0.42em;
+      letter-spacing: 0.04em;
+      margin-top: 14px;
+      color: var(--ink);
+    }}
+    .lp-tagline {{
+      font-family: var(--body);
+      font-size: 14px;
+      font-style: italic;
+      color: var(--margin-grey);
+      line-height: 1.45;
+      max-width: 280px;
+      text-align: right;
+      padding-bottom: 6px;
+    }}
+    .lp-tagline .em {{
+      font-family: var(--display);
+      font-style: italic;
+      color: var(--vermilion);
+      font-weight: 600;
+    }}
+
+    /* Streamlit 原生 tabs → 章节标号 */
+    button[data-baseweb="tab"] {{
+      font-family: var(--display) !important;
+      font-style: italic !important;
+      font-size: 17px !important;
+      letter-spacing: 0.01em;
+      color: var(--ink-mute) !important;
+      padding: 14px 4px !important;
+    }}
+    button[data-baseweb="tab"][aria-selected="true"] {{
+      color: var(--ink) !important;
+      border-bottom-color: var(--vermilion) !important;
+    }}
+    div[data-baseweb="tab-highlight"] {{ background: var(--vermilion) !important; }}
+    div[data-baseweb="tab-border"] {{ background: var(--rule) !important; opacity: 0.18; }}
+
+    /* 指标卡片 */
+    div[data-testid="stMetric"] {{
+      background: var(--paper-soft);
+      border: 1px solid rgba(42,37,32,.12);
+      border-radius: 0;
+      padding: 14px 18px;
+      box-shadow: inset 0 -2px 0 var(--vermilion);
+    }}
+    div[data-testid="stMetricLabel"] {{
+      font-family: var(--mono) !important;
+      font-size: 10px !important;
+      letter-spacing: 0.16em !important;
+      text-transform: uppercase;
+      color: var(--margin-grey) !important;
+    }}
+    div[data-testid="stMetricValue"] {{
+      font-family: var(--display) !important;
+      font-weight: 700 !important;
+      color: var(--ink) !important;
+    }}
+
+    /* Sidebar 调性 */
+    section[data-testid="stSidebar"] {{
+      background: var(--paper-soft);
+      border-right: 1px solid rgba(42,37,32,.12);
+    }}
+    section[data-testid="stSidebar"] h2, section[data-testid="stSidebar"] h3 {{
+      font-family: var(--display);
+      font-style: italic;
+    }}
+
+    /* 输入控件 — 去圆角 */
+    .stTextInput input, .stTextArea textarea, .stSelectbox div[role="combobox"] {{
+      border-radius: 0 !important;
+      border-color: rgba(42,37,32,.25) !important;
+      background: var(--paper-soft) !important;
+      font-family: var(--body) !important;
+    }}
+    .stTextArea textarea {{ font-size: 15px !important; line-height: 1.55 !important; }}
+
+    /* 按钮 */
+    .stButton button, .stDownloadButton button {{
+      border-radius: 0 !important;
+      font-family: var(--display) !important;
+      font-style: italic;
+      letter-spacing: 0.02em;
+      border: 1px solid var(--ink) !important;
+      background: var(--paper-soft) !important;
+      color: var(--ink) !important;
+      transition: all .18s ease;
+    }}
+    .stButton button:hover, .stDownloadButton button:hover {{
+      background: var(--ink) !important;
+      color: var(--paper) !important;
+    }}
+    button[kind="primary"] {{
+      background: var(--vermilion) !important;
+      color: var(--paper) !important;
+      border-color: var(--vermilion) !important;
+    }}
+    button[kind="primary"]:hover {{
+      background: var(--ink) !important;
+      border-color: var(--ink) !important;
+    }}
+
+    /* st.info / st.warning / st.success → 减少花哨气泡 */
+    div[data-baseweb="notification"] {{ border-radius: 0 !important; }}
+
+    /* 隐藏 Streamlit 自带页眉留白 */
+    header[data-testid="stHeader"] {{ background: transparent; }}
+    </style>
+
+    <div class="lp-masthead">
+      <div class="lp-meta-row">
+        <div class="left">
+          <span>Vol. I</span>
+          <span>No. {datetime.now().strftime("%j")}</span>
+          <span class="accent">EDITORIAL DESK</span>
+        </div>
+        <div>{_TODAY_LABEL}</div>
+      </div>
+      <div class="lp-title-row">
+        <h1 class="lp-title">
+          Social&nbsp;Copy<span class="cn">中文素材 · 多平台改写工坊</span>
+        </h1>
+        <div class="lp-tagline">
+          抓取 · 双语提取 · <span class="em">逐平台改写</span> · 自动审稿
+        </div>
+      </div>
     </div>
-    <div class="portal-nav">
-      <span>首页</span><span>通知公告</span><span>素材采编</span><span>多平台发布</span><span>统计与归档</span>
-    </div>
-    <div class="portal-notice">【系统公告】本系统用于校园新闻内容提炼与多平台文案生成，请严格遵守事实性与版权规范。</div>
     """,
     unsafe_allow_html=True,
 )
@@ -1517,7 +1764,7 @@ else:
     st.info(f"已准备好生成 {estimated_posts} 条文案{quality_note}。")
 
 # ---------- 输入区 ----------
-tab_input, tab_results, tab_logs = st.tabs(["🏫 首页与素材", "📝 生成结果", "📊 用量统计"])
+tab_input, tab_results, tab_logs = st.tabs(["A · Source", "B · Press", "C · Ledger"])
 
 with tab_input:
     col1, col2 = st.columns(2)
@@ -1754,14 +2001,25 @@ with tab_results:
                                 key=body_key,
                             )
                             edited_post = _post_with_body(post, edited_body)
-                            cdl, cmeta = st.columns([1, 3])
-                            with cdl:
+                            cdl_md, cdl_docx, cmeta = st.columns([1, 1, 3])
+                            with cdl_md:
                                 st.download_button(
-                                    "⬇️ 下载 .md",
+                                    "⬇️ .md",
                                     data=post_to_markdown(edited_post),
                                     file_name=f"{art['name']}_{post.platform}.md",
                                     mime="text/markdown",
-                                    key=f"dl_{art['name']}_{post.platform}_{post.variant}",
+                                    key=f"dl_md_{art['name']}_{post.platform}_{post.variant}",
+                                    use_container_width=True,
+                                )
+                            with cdl_docx:
+                                st.download_button(
+                                    "📄 .docx",
+                                    data=post_to_docx(edited_post),
+                                    file_name=f"{art['name']}_{post.platform}.docx",
+                                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                                    key=f"dl_docx_{art['name']}_{post.platform}_{post.variant}",
+                                    help="Times New Roman 12pt 正文 + 16pt 加粗标题",
+                                    use_container_width=True,
                                 )
                             with cmeta:
                                 quality_bits = ""

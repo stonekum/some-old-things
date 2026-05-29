@@ -74,3 +74,60 @@ def test_app_extract_accepts_xiaohongshu_platform_aliases():
 
     assert extract.platforms == ["xiaohongshu", "xiaohongshu"]
     assert "xiaohongshu" in app_mod.GEN_PROMPTS
+
+
+def test_strip_trailing_periods_basic():
+    app_mod = _load_app_module()
+    fn = app_mod._strip_trailing_periods
+    assert fn("hello world.") == "hello world"
+    assert fn("一段话。") == "一段话"
+    assert fn("a.\n\nb。\n\nc") == "a\n\nb\n\nc"
+    # 多个连续句号也清掉
+    assert fn("really...") == "really"
+    assert fn("真的呢。。。") == "真的呢"
+
+
+def test_strip_trailing_periods_preserves_questions_and_midline():
+    app_mod = _load_app_module()
+    fn = app_mod._strip_trailing_periods
+    # 问号、感叹号、中间句号、行末空格
+    assert fn("Really?") == "Really?"
+    assert fn("Wow!") == "Wow!"
+    assert fn("Open this URL https://x.y/z.html") == "Open this URL https://x.y/z.html"
+    # 段内的句号保留（不是行末）
+    assert fn("Dr. Smith arrived today.") == "Dr. Smith arrived today"
+
+
+def test_strip_trailing_periods_skips_hashtag_lines():
+    app_mod = _load_app_module()
+    fn = app_mod._strip_trailing_periods
+    out = fn("Body line.\n\n#Foo #Bar #Baz")
+    assert out == "Body line\n\n#Foo #Bar #Baz"
+
+
+def test_post_to_docx_is_valid_zip_with_times_new_roman():
+    app_mod = _load_app_module()
+    Post = app_mod.Post
+    post = Post(
+        article_slug="x",
+        platform="instagram",
+        variant=1,
+        title="Hello",
+        body="paragraph one\n\nparagraph two",
+        model="m",
+        served_model="m",
+        api_url="https://x",
+        from_cache=False,
+        prompt_tokens=0,
+        completion_tokens=0,
+        generated_at=datetime.now(),
+        prompt_version="v1",
+    )
+    blob = app_mod.post_to_docx(post)
+    # .docx 是 zip；前两字节是 PK
+    assert blob[:2] == b"PK"
+    # Times New Roman 必须出现在 document.xml 里
+    import zipfile, io
+    with zipfile.ZipFile(io.BytesIO(blob)) as zf:
+        doc_xml = zf.read("word/document.xml").decode("utf-8", errors="ignore")
+        assert "Times New Roman" in doc_xml
