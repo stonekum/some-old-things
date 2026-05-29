@@ -2,7 +2,29 @@
 
 > Branch: `feat/video-input` · 启用 2026-05-29
 >
-> 当前位于 **tracer bullet 阶段** —— UI + pipeline 接通，ASR 后端是 stub 占位。
+> **🛑 状态：暂停（2026-05-29）。** UI + pipeline tracer bullet 已完成，
+> 但因 ASR 后端没有零成本可用方案，主动暂停推进。本分支保留在 GitHub，
+> 等愿意接入付费 ASR（OpenAI / 火山引擎）或自建 whisper 服务器时可以直接续做。
+
+## 为什么暂停（关键发现）
+
+调查了 SJTU OpenClaw 官方 API 文档（<https://claw.sjtu.edu.cn/guide/sjtu-api/>），
+**确认 SJTU 当前 5 个模型里没有任何 ASR 能力**：
+
+| 模型 | 模式 |
+|---|---|
+| DeepSeek V3.2 (chat) | 通用文本 |
+| DeepSeek V3.2 (reasoner) | 文本深度推理 |
+| MiniMax-M2.7 | 文本生成 / 智能体 |
+| GLM-5.1 | 文本生成 / 代码 |
+| **Qwen3.5-27B** | **多模态：视觉 + 文本**（**不含音频**） |
+
+Qwen3.5-27B 虽然标注"多模态"，但官方示例只接受 `image_url` 字段——**是 VLM，
+不是 audio 模型**。全文搜 `audio` / `whisper` / `语音` / `音频` / `转录` 零结果。
+
+结论：**SJTU 这条路（曾经唯一的"免费"路径）走不通**。剩下的选项都需要付费 API
+或自建机器。在校内小规模、实验性功能的场景下，"投资 ASR 基础设施"性价比不够，
+所以暂停。
 
 ## 已完成（这次 commit）
 
@@ -27,26 +49,34 @@ UI 上 stub 返回会显眼标记 ⚠️ 占位，避免被误以为真 ASR 在�
 | **本地 faster-whisper** | ⭐⭐⭐⭐ | 0 | 1 天 | Streamlit Cloud 免费档 CPU 扣不动；需要本机或自建服务器 |
 | **火山引擎 ASR** | ⭐⭐⭐⭐⭐ | ¥0.012/分钟 | 1 天 | 需注册火山引擎账号 + 实名 |
 | **阿里云 ASR** | ⭐⭐⭐⭐⭐ | ¥0.0145/分钟 | 1 天 | 需阿里云账号 |
-| **SJTU Claw 多模态** | ❓ | 免费（如果有）| 0.5 天 | **不确定是否有 audio endpoint** |
+| ~~**SJTU Claw 多模态**~~ | ❌ | — | — | **2026-05-29 已验证：无 ASR；Qwen3.5-27B 仅支持图像** |
 | **DeepSeek 多模态** | — | — | — | ❌ 当前 API 无 audio 端点 |
+| **Qwen3.5-27B VLM 替代方案** | ⭐⭐（只看画面） | 免费 | 1.5 天 | 抽帧 → 视觉描述。**会丢讲话内容**，适合风光片不适合演讲 |
 
-## 下一步选型决策（等做）
+## 续作时的决策路径
 
-按照"先验证 → 再选 → 再做"的顺序：
+恢复推进时，按下面这个顺序选：
 
-1. **验证 SJTU 是否有 ASR**
-   - 用 Streamlit sidebar 的「📋 列出该后端支持的模型」按钮
-   - 如果列表里看到 `whisper-*` / `paraformer-*` / `audio-*` 字样 → 优先用 SJTU
-   - 看不到就直接跳到步骤 2
+1. **OpenAI Whisper API**（推荐）
+   - 注册 OpenAI 账号 + 充值（$5 起，约 ¥36）
+   - Streamlit Secrets 加 `OPENAI_API_KEY`
+   - 在 `video_input.py` 加 `OpenAIWhisperTranscriber` 类
+   - 改 `get_default_transcriber()`：有 OPENAI_API_KEY → 用 Whisper；否则保留 stub
+   - 测试一个 1-2 分钟视频确认中文转录质量
+   - 约 0.5 天工作量
 
-2. **二选一**：
-   - 用爱发电：本地 faster-whisper（需另起机器跑）
-   - 用现成的：OpenAI Whisper（最稳，成本低）
+2. **本地 faster-whisper**（如果坚持自建 / 隐私要求高）
+   - 需要另起一台机器跑（Streamlit Cloud 免费档不行）
+   - 装 `faster-whisper` + 下载模型（约 1-2GB）
+   - 在 `video_input.py` 加 `LocalWhisperTranscriber`
+   - 约 1 天工作量 + 1 台服务器持续运维
 
-3. **写对应的 Transcriber 类**
-   - 在 `video_input.py` 加 `SJTUTranscriber` 或 `OpenAIWhisperTranscriber`
-   - 改 `get_default_transcriber()` 读取 env / config 切换
-   - 更新此文档
+3. **Qwen3.5-27B VLM 视觉路径**（场景特殊时）
+   - 仅适合"风光延时 / 校园活动剪影"这种**信息在画面**的视频
+   - 用 moviepy 抽帧（如每 5 秒 1 帧）
+   - 拼成 image_url 数组 → Qwen 描述每帧 → 用 LLM 总结成叙事
+   - 完全免费（用 SJTU Qwen 额度）
+   - 工作量 1.5 天
 
 ## 风险 & 边界条件（已经想过的）
 
