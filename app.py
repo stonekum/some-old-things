@@ -15,19 +15,21 @@ Streamlit 单文件版「中→英 社交文案生成工作流」
 from __future__ import annotations
 
 import hashlib
+import hmac
 import io
 import ipaddress
 import json
 import os
 import re
 import socket
+import threading
 import time
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from datetime import datetime
-from typing import Any, Literal
-from urllib.parse import urlparse
+from datetime import datetime, timezone
+from typing import Any, Callable, Literal
+from urllib.parse import urljoin, urlparse
 
 import requests
 import streamlit as st
@@ -541,7 +543,7 @@ class Post(BaseModel):
     body: str
     model: str
     prompt_version: str = PROMPT_VERSION
-    generated_at: datetime = Field(default_factory=datetime.utcnow)
+    generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     prompt_tokens: int = 0
     completion_tokens: int = 0
     # 后端实际服务的模型名 (deepseek-chat alias 可能跑 deepseek-v4-flash)
@@ -622,13 +624,30 @@ def _cache_get(key: str) -> dict | None:
     try:
         with open(p, "r", encoding="utf-8") as f:
             return json.load(f)
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, OSError):
+        # Torn write left from a crashed previous run, or transient FS error —
+        # treat as a cache miss so the caller re-fetches and re-writes cleanly.
         return None
 
 
 def _cache_set(key: str, value: dict) -> None:
-    with open(_cache_path(key), "w", encoding="utf-8") as f:
-        json.dump(value, f, ensure_ascii=False, indent=2)
+    # Atomic write: serialize to a temp file in the same directory, then
+    # os.replace into place. Prevents truncated/half-written cache files when
+    # multiple worker threads write the same key concurrently or the process
+    # is killed mid-write.
+    target = _cache_path(key)
+    tmp = f"{target}.tmp.{os.getpid()}.{threading.get_ident()}"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(value, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, target)
+    except OSError:
+        # Best-effort cleanup; failing to cache is non-fatal.
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 # ============================================================================
@@ -737,6 +756,10 @@ def llm_chat(
                     response=r,
                 )
             data = r.json()
+            if not data.get("choices"):
+                # Some backends return `{"choices": []}` on filter / quota
+                # rejection. Treat as a retryable error rather than a crash.
+                raise ValueError(f"LLM response had no choices: {str(data)[:200]}")
             msg = data["choices"][0]["message"]
             content = msg["content"]
             # DeepSeek reasoner 系列会返回思维链
@@ -763,7 +786,10 @@ def llm_chat(
                 },
             )
             return out
-        except (requests.RequestException, KeyError, ValueError) as e:
+        except (requests.RequestException, KeyError, IndexError, ValueError) as e:
+            # Include IndexError so an empty `choices` array doesn't escape as
+            # an unretried crash. KeyError covers missing `message`/`content`,
+            # IndexError covers `choices[]`.
             last_err = e
             print(f"[llm_chat] ✗ {host} attempt={attempt} err={type(e).__name__}: {str(e)[:200]}", flush=True)
             time.sleep(cfg.retry_backoff * attempt)
@@ -1038,6 +1064,21 @@ def revise_post(
     return _post_with_quality(post, review)
 
 
+def _record_quality_error(error_sink: list[str] | None, message: str) -> None:
+    """收集质量审稿错误。
+
+    - 单线程路径（``error_sink is None``）：直接写 ``st.session_state``——
+      在 Streamlit 主线程里这是安全的。
+    - 并发路径：写到调用方传入的 list，调用方负责加锁（``threading.Lock``）；
+      worker 线程禁止接触 ``st.session_state``——它不是线程安全的，而且
+      worker 缺少 ``ScriptRunContext``，能静默丢错误甚至抛警告。
+    """
+    if error_sink is None:
+        st.session_state.setdefault("_quality_errors", []).append(message)
+    else:
+        error_sink.append(message)
+
+
 def review_and_maybe_revise(
     cfg: LLMConfig,
     model: str,
@@ -1047,14 +1088,19 @@ def review_and_maybe_revise(
     style_seed: str = "",
     min_score: int = 80,
     no_cache: bool = False,
+    error_sink: list[str] | None = None,
 ) -> tuple[Post, QualityReview | None]:
-    """Quality 步骤失败时优雅回退到未审稿的 post，不让单条审稿挂掉整篇文章。"""
+    """Quality 步骤失败时优雅回退到未审稿的 post，不让单条审稿挂掉整篇文章。
+
+    并发场景必须传 ``error_sink``（线程安全 list），否则会从 worker 线程写
+    ``st.session_state``，触发 ScriptRunContext 警告并可能丢错误。
+    """
     try:
         review = review_post(cfg, model, ex, post, style_seed=style_seed, no_cache=no_cache)
     except Exception as e:
-        # 通过 session state 收集错误，主循环统一展示
-        st.session_state.setdefault("_quality_errors", []).append(
-            f"{post.article_slug}/{post.platform} v{post.variant} · review 失败：{e}"
+        _record_quality_error(
+            error_sink,
+            f"{post.article_slug}/{post.platform} v{post.variant} · review 失败：{e}",
         )
         return post, None
 
@@ -1071,8 +1117,9 @@ def review_and_maybe_revise(
                 no_cache=no_cache,
             ), review
         except Exception as e:
-            st.session_state.setdefault("_quality_errors", []).append(
-                f"{post.article_slug}/{post.platform} v{post.variant} · revise 失败：{e}"
+            _record_quality_error(
+                error_sink,
+                f"{post.article_slug}/{post.platform} v{post.variant} · revise 失败：{e}",
             )
             return _post_with_quality(post, review), review
     return _post_with_quality(post, review), review
@@ -1120,15 +1167,37 @@ def _assert_safe_url(url: str) -> None:
 
 
 def _safe_get(url: str, *, headers: dict | None = None, timeout: int = 30) -> requests.Response:
-    """带 SSRF 防护 + redirect 上限 + 响应体大小限制的 GET。"""
-    _assert_safe_url(url)
+    """带 SSRF 防护 + redirect 上限 + 响应体大小限制的 GET。
+
+    关键安全点：必须 ``allow_redirects=False`` 并手动逐跳校验。
+    旧实现用 ``allow_redirects=True`` 只在最终落点校验 ``r.url``——
+    中间一跳 (e.g. ``public.com → http://169.254.169.254/...``) 已经发出
+    请求才被检查，是经典 SSRF 重定向绕过。
+    """
     session = requests.Session()
-    session.max_redirects = _MAX_REDIRECTS
     headers = {"User-Agent": _UA, **(headers or {})}
-    r = session.get(url, headers=headers, timeout=timeout, stream=True, allow_redirects=True)
-    # 跟跳后必须重新验证最终落点
-    if r.url != url:
-        _assert_safe_url(r.url)
+    current = url
+    for hop in range(_MAX_REDIRECTS + 1):
+        _assert_safe_url(current)
+        r = session.get(
+            current,
+            headers=headers,
+            timeout=timeout,
+            stream=True,
+            allow_redirects=False,
+        )
+        if r.is_redirect or r.is_permanent_redirect:
+            location = r.headers.get("Location")
+            if not location:
+                # 状态码说要跳但没给 Location，按非重定向走完成处理
+                break
+            # 关掉这个响应体，准备下一跳
+            r.close()
+            current = urljoin(current, location)
+            if hop == _MAX_REDIRECTS:
+                raise ValueError(f"超过最大重定向次数 ({_MAX_REDIRECTS})")
+            continue
+        break
     r.raise_for_status()
 
     # 流式读取，超过上限截断
@@ -1191,7 +1260,7 @@ def fetch_generic(url: str) -> tuple[str, str]:
     return title, "\n\n".join(chunks)
 
 
-FETCHERS: dict[str, callable] = {
+FETCHERS: dict[str, Callable[[str], tuple[str, str]]] = {
     "微信公众号": fetch_wechat,
     "SJTU 新闻": fetch_sjtu_news,
     "通用网页": fetch_generic,
@@ -1317,7 +1386,9 @@ def _get_secret(name: str, default: str = "") -> str:
         # st.secrets 在没配 secrets.toml 时访问会抛 FileNotFoundError
         if name in st.secrets:
             return str(st.secrets[name])
-    except (FileNotFoundError, KeyError, Exception):
+    except Exception:
+        # st.secrets 在不同部署环境下可能抛 FileNotFoundError/KeyError/
+        # StreamlitSecretNotFoundError 等多种异常；统一吞掉回落到 env。
         pass
     return os.environ.get(name, default)
 
@@ -1333,7 +1404,8 @@ def _check_app_password() -> bool:
     st.caption("此应用受密码保护，请输入访问密码。")
     pw = st.text_input("访问密码", type="password", key="_pw_input")
     if pw:
-        if pw == expected:
+        # 常数时间比较，避免按字符早退被时序侧信道暴露密码长度/前缀
+        if hmac.compare_digest(pw, expected):
             st.session_state._authed = True
             st.rerun()
         else:
@@ -1702,6 +1774,10 @@ with st.sidebar:
     )
     variants = st.slider("每个平台生成几条变体", 1, 3, 1)
     max_workers = st.slider("并发数", 1, 8, 4, help="LLM 并发调用数（仅 DeepSeek 官方有效；SJTU 强制单线程）")
+    if "deepseek.com" not in api_url and max_workers > 1:
+        # 旧版本静默把非 DeepSeek 端点降级为单线程，用户拖了滑块以为生效，
+        # 实际还是 1 线程。这里加 caption，避免"为什么并发没快"的困惑。
+        st.caption("⚠️ 当前后端非 DeepSeek 官方，已强制单线程；上面的并发数设置不生效。")
     temperature = st.slider(
         "创意度 (Temperature)",
         0.0, 1.2, 0.7, 0.1,
@@ -1935,6 +2011,21 @@ with tab_input:
                 except Exception as e:
                     errors[idx] = e
 
+        # 并发路径专用的错误收集器：worker 线程禁止碰 st.session_state，
+        # 这里用一个 list + Lock 暂存，as_completed 后再 merge 进 session_state。
+        thread_error_sink: list[str] = []
+        thread_error_lock = threading.Lock()
+
+        class _LockedAppendList(list):
+            """A list whose append is serialized by a Lock so worker threads
+            can hand errors back without races."""
+
+            def append(self, item):  # type: ignore[override]
+                with thread_error_lock:
+                    super().append(item)
+
+        safe_sink: list[str] = _LockedAppendList()
+
         def _work_article_threaded(idx_art):
             idx, art = idx_art
             try:
@@ -1955,6 +2046,7 @@ with tab_input:
                                 style_seed=style_seed_text,
                                 min_score=min_quality_score,
                                 no_cache=not use_cache,
+                                error_sink=safe_sink,
                             )
                         posts.append(post)
                 return idx, ex, posts, None
@@ -1974,6 +2066,10 @@ with tab_input:
                             errors[idx] = err
                         else:
                             results[idx] = (ex, posts)
+                # 把 worker 收集到的质量审稿警告 merge 进 session_state，
+                # 后续展示走和单线程路径一致的代码。
+                if thread_error_sink:
+                    st.session_state.setdefault("_quality_errors", []).extend(thread_error_sink)
             else:
                 _run_single_threaded()
         except Exception as fatal:
@@ -1993,11 +2089,19 @@ with tab_input:
                 with st.expander(f"第 {idx + 1} 篇失败 · {type(e).__name__}", expanded=True):
                     st.code(str(e), language="text")
 
-        # token 统计
-        for posts_dump in (ss.articles[i].get("posts", []) for i in results):
-            for p in posts_dump:
-                ss.total_tokens_in += p["prompt_tokens"]
-                ss.total_tokens_out += p["completion_tokens"]
+        # token 统计：从所有已处理文章的 posts 重新汇总，而不是在原值上 +=。
+        # 旧实现每次"开始生成"都把这一轮的 tokens 加到累计值上，但重跑会让
+        # 缓存命中的文章被双重计入，导致显示远大于实际开销。
+        ss.total_tokens_in = sum(
+            p.get("prompt_tokens", 0)
+            for a in ss.articles
+            for p in a.get("posts", [])
+        )
+        ss.total_tokens_out = sum(
+            p.get("completion_tokens", 0)
+            for a in ss.articles
+            for p in a.get("posts", [])
+        )
         st.success(f"完成 {len(results)} 篇，{sum(len(p) for _, p in results.values())} 条文案")
 
         # 展示质量审稿过程中收集的错误（上一版只 print 到 stderr，用户看不到）

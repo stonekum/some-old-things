@@ -145,7 +145,7 @@ src/copy_workflow/
 ├── crawlers/            wechat.py、sjtu_news.py
 └── prompts/             各平台 prompt 模板（版本化 .md 文件）
 legacy/                  原始旧脚本归档（仅供参考，密钥已脱敏）
-tests/                   单元测试（26 个，覆盖缓存、模型校验、JSON 解析）
+tests/                   单元测试（覆盖缓存、模型校验、JSON 解析、SSRF 防护、平台路由、质量审稿、CLI 流程等）
 ```
 
 ---

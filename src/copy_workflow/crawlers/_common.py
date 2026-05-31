@@ -12,6 +12,21 @@ from ..url_safety import UnsafeURLError, safe_get
 
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
 
+# Raster formats only — SVG is XML that can carry scripts/external entities,
+# so we never persist attacker-supplied SVG bytes to disk under an .jpg name.
+_RASTER_CONTENT_TYPES: tuple[str, ...] = (
+    "image/jpeg",
+    "image/png",
+    "image/gif",
+    "image/webp",
+)
+_EXT_BY_CONTENT_TYPE: dict[str, str] = {
+    "image/jpeg": "jpg",
+    "image/png": "png",
+    "image/gif": "gif",
+    "image/webp": "webp",
+}
+
 
 def make_session(user_agent: str, referer: str | None = None) -> requests.Session:
     s = requests.Session()
@@ -55,12 +70,18 @@ def download_images(
                 url,
                 timeout=20,
                 max_bytes=MAX_IMAGE_BYTES,
-                allowed_content_types=("image/",),
+                allowed_content_types=_RASTER_CONTENT_TYPES,
             )
-            if r.content:
-                out_dir.mkdir(parents=True, exist_ok=True)
-                (out_dir / f"{prefix}_{idx}.jpg").write_bytes(r.content)
-                count += 1
+            if not r.content:
+                continue
+            # Pick the real extension from the response's Content-Type rather
+            # than blindly writing .jpg — a PNG written as .jpg can confuse
+            # downstream tools, and we already rejected non-raster types above.
+            ctype = (r.headers.get("Content-Type", "").split(";", 1)[0]).strip().lower()
+            ext = _EXT_BY_CONTENT_TYPE.get(ctype, "jpg")
+            out_dir.mkdir(parents=True, exist_ok=True)
+            (out_dir / f"{prefix}_{idx}.{ext}").write_bytes(r.content)
+            count += 1
         except (OSError, UnsafeURLError, requests.RequestException, ValueError):
             continue
     return count

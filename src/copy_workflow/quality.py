@@ -108,28 +108,36 @@ def _plain_text_issues(post: Post) -> list[QualityIssue]:
     return issues
 
 
-def _hashtag_issues(post: Post) -> list[QualityIssue]:
+def _hashtag_issues(
+    post: Post,
+    *,
+    min_count: int,
+    max_count: int,
+    require_camel_case: bool,
+    platform_label: str,
+) -> list[QualityIssue]:
     hashtags = re.findall(r"(?<!\w)#([A-Za-z][A-Za-z0-9]*)", post.body)
     issues: list[QualityIssue] = []
-    if not 2 <= len(hashtags) <= 3:
+    if not min_count <= len(hashtags) <= max_count:
         issues.append(
             QualityIssue(
                 category="constraints",
                 severity="high",
-                message="Twitter posts must end with 2-3 hashtags.",
-                suggestion="Use exactly 2 or 3 concise hashtags at the end.",
+                message=f"{platform_label} posts must end with {min_count}-{max_count} hashtags.",
+                suggestion=f"Use {min_count}-{max_count} concise hashtags at the end.",
             )
         )
-    bad = [tag for tag in hashtags if not re.fullmatch(r"[A-Z][A-Za-z0-9]*", tag)]
-    if bad:
-        issues.append(
-            QualityIssue(
-                category="constraints",
-                severity="medium",
-                message="Twitter hashtags must use CamelCase.",
-                suggestion="Rewrite hashtags like #CampusLife or #ShanghaiJiaoTong.",
+    if require_camel_case:
+        bad = [tag for tag in hashtags if not re.fullmatch(r"[A-Z][A-Za-z0-9]*", tag)]
+        if bad:
+            issues.append(
+                QualityIssue(
+                    category="constraints",
+                    severity="medium",
+                    message=f"{platform_label} hashtags must use CamelCase.",
+                    suggestion="Rewrite hashtags like #CampusLife or #ShanghaiJiaoTong.",
+                )
             )
-        )
     return issues
 
 
@@ -156,7 +164,27 @@ def validate_hard_rules(post: Post) -> QualityReview:
                     suggestion="Remove paragraph breaks from the tweet body.",
                 )
             )
-        issues.extend(_hashtag_issues(post))
+        issues.extend(
+            _hashtag_issues(
+                post,
+                min_count=2,
+                max_count=3,
+                require_camel_case=True,
+                platform_label="Twitter",
+            )
+        )
+    elif post.platform == "linkedin":
+        # LinkedIn prompt mandates 3-5 hashtags on the last line. CamelCase
+        # isn't required on LinkedIn (lowercase tags are normal there).
+        issues.extend(
+            _hashtag_issues(
+                post,
+                min_count=3,
+                max_count=5,
+                require_camel_case=False,
+                platform_label="LinkedIn",
+            )
+        )
     elif post.platform == "wechat":
         zh_len = len(re.findall(r"[\u4e00-\u9fff]", post.body))
         if not 220 <= zh_len <= 320:

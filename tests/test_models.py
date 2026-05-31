@@ -69,6 +69,13 @@ def test_xiaohongshu_platform_accepted():
     assert e.platforms == ["xiaohongshu"]
 
 
-def test_unknown_platform_rejected():
-    with pytest.raises(Exception):
-        Extract.model_validate(_minimal(platforms=["myspace"]))
+def test_unknown_platform_filtered_out():
+    # Unknown platforms are skipped (not raised) so one hallucinated name
+    # doesn't lose the entire extract. Empty result falls back to default.
+    e = Extract.model_validate(_minimal(platforms=["myspace"]))
+    assert e.platforms == ["instagram"]
+
+
+def test_unknown_platforms_filtered_others_kept():
+    e = Extract.model_validate(_minimal(platforms=["myspace", "Twitter", "tiktok"]))
+    assert e.platforms == ["twitter"]

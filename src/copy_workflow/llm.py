@@ -116,6 +116,8 @@ class DeepSeekClient:
         }
 
         last_err: Exception | None = None
+        last_status: int | None = None
+        last_body: str | None = None
         for attempt in range(1, self.cfg.generation.retries + 1):
             t0 = time.time()
             try:
@@ -125,8 +127,23 @@ class DeepSeekClient:
                     headers=headers,
                     timeout=self.cfg.generation.request_timeout_sec,
                 )
+                # Capture body for diagnostics BEFORE raise_for_status; truncate
+                # so we don't bloat logs / exception messages.
+                last_status = resp.status_code
+                try:
+                    last_body = resp.text[:500]
+                except Exception:  # noqa: BLE001 — defensive
+                    last_body = None
+                # Don't waste retries on non-retryable 4xx (bad key, bad request,
+                # not found, etc.). 408/429 are still retryable.
+                if 400 <= resp.status_code < 500 and resp.status_code not in (408, 429):
+                    raise RuntimeError(
+                        f"LLM call failed: HTTP {resp.status_code}: {last_body}"
+                    )
                 resp.raise_for_status()
                 data = resp.json()
+                if not data.get("choices"):
+                    raise ValueError(f"LLM response missing choices: {data}")
                 content = data["choices"][0]["message"]["content"]
                 usage = data.get("usage", {}) or {}
                 out = LLMResponse(
@@ -145,32 +162,42 @@ class DeepSeekClient:
                         "completion_tokens": out.completion_tokens,
                     }
                 )
+                # Persist only the fields actually consumed on a cache hit;
+                # storing the full raw response doubled disk usage for no gain.
                 self.cache.set(
                     key,
                     {
                         "content": out.content,
-                        "raw": out.raw,
                         "prompt_tokens": out.prompt_tokens,
                         "completion_tokens": out.completion_tokens,
                     },
                 )
                 return out
-            except (requests.RequestException, KeyError, ValueError) as e:
+            except (requests.RequestException, KeyError, IndexError, ValueError) as e:
                 last_err = e
                 logger.warning(
                     {
                         "event": "llm_retry",
                         "attempt": attempt,
                         "error": repr(e),
+                        "status": last_status,
                     }
                 )
                 time.sleep(self.cfg.generation.retry_backoff_sec * attempt)
 
-        raise RuntimeError(f"LLM call failed after retries: {last_err}")
+        detail = (
+            f" [HTTP {last_status}: {last_body}]"
+            if last_status is not None
+            else ""
+        )
+        raise RuntimeError(f"LLM call failed after retries: {last_err}{detail}")
 
 
 def parse_json_strict(text: str) -> dict[str, Any]:
-    """Strip markdown fences if any, then json.loads."""
+    """Extract the first JSON object from `text`, tolerating markdown fences
+    and trailing prose. Chatty LLMs that emit '{...}\\n\\nNote: ...' no longer
+    crash the pipeline.
+    """
     s = text.strip()
     if s.startswith("```"):
         # remove leading ```json or ``` and trailing ```
@@ -180,7 +207,26 @@ def parse_json_strict(text: str) -> dict[str, Any]:
         if s.endswith("```"):
             s = s[:-3]
         s = s.strip()
-    return json.loads(s)
+
+    # Fast path: clean JSON.
+    try:
+        return json.loads(s)
+    except json.JSONDecodeError:
+        pass
+
+    # Tolerant path: find the first balanced JSON object and decode that.
+    # We use raw_decode anchored at the first '{' (or '[' for the rare array
+    # response) to discard any trailing commentary.
+    start = -1
+    for i, ch in enumerate(s):
+        if ch in "{[":
+            start = i
+            break
+    if start == -1:
+        raise json.JSONDecodeError("No JSON object/array found", s, 0)
+    decoder = json.JSONDecoder()
+    obj, _end = decoder.raw_decode(s[start:])
+    return obj
 
 
 def call_with_validation(

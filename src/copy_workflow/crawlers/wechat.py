@@ -40,6 +40,9 @@ def crawl(cfg: Config) -> int:
         try:
             r = safe_get(session, url, timeout=30)
             r.raise_for_status()
+            # WeChat omits/lies about charset in the header; pin UTF-8 explicitly
+            # so requests doesn't fall back to ISO-8859-1 and mojibake the page.
+            r.encoding = "utf-8"
             soup = BeautifulSoup(r.text, "html.parser")
 
             title_tag = soup.find("h1", class_="rich_media_title")

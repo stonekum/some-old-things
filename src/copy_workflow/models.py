@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
 
-from .platforms import Platform, normalize_platform
+from .platforms import Platform, normalize_platform, valid_platforms
 
 
 class Extract(BaseModel):
@@ -53,11 +53,15 @@ class Extract(BaseModel):
     @field_validator("platforms", mode="before")
     @classmethod
     def _lower_platforms(cls, v: Any) -> Any:
+        # Tolerant: skip unknown platforms (LLMs occasionally invent "tiktok",
+        # "weibo", etc.) instead of failing the entire extract. Falls back to
+        # ["instagram"] if every entry was unknown or input was empty.
         if v is None:
             return ["instagram"]
         if isinstance(v, str):
             v = [p.strip() for p in v.split(",")]
-        return [normalize_platform(str(p)) for p in v if p]
+        cleaned = valid_platforms([str(p) for p in v if p])
+        return cleaned or ["instagram"]
 
 
 class Post(BaseModel):
@@ -70,7 +74,7 @@ class Post(BaseModel):
     body: str
     model: str
     prompt_version: str
-    generated_at: datetime = Field(default_factory=datetime.utcnow)
+    generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     prompt_tokens: int = 0
     completion_tokens: int = 0
     quality_score: int | None = None
