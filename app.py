@@ -1458,6 +1458,18 @@ st.markdown(
     .stApp, .stApp p, .stApp div, .stApp span, .stApp label {{
       font-family: var(--body);
     }}
+    /* Material icon ligatures (上传/展开/箭头) 必须用 icon 字体渲染，
+       否则全局 body 字体会把 "upload"/"keyboard_arrow_down" 当字面文字画出来，
+       与旁边的真实标签叠成 "uploadUpload" / "_arrow_诊断工具" */
+    [data-testid="stIconMaterial"],
+    [data-testid="stIcon"],
+    .material-icons,
+    .material-symbols-rounded,
+    .material-symbols-outlined,
+    [class*="material-icons"],
+    [class*="material-symbols"] {{
+      font-family: 'Material Symbols Rounded', 'Material Symbols Outlined', 'Material Icons' !important;
+    }}
     h1, h2, h3, h4 {{ font-family: var(--display); color: var(--ink); letter-spacing: -0.01em; }}
     h3 {{ font-weight: 500; font-style: italic; }}
 
@@ -1818,6 +1830,20 @@ ss.setdefault("articles", [])  # list[{name, text, extract?, posts?}]
 ss.setdefault("total_tokens_in", 0)
 ss.setdefault("total_tokens_out", 0)
 ss.setdefault("cache_hits", 0)
+ss.setdefault("last_run_elapsed_sec", 0.0)
+ss.setdefault("total_elapsed_sec", 0.0)
+
+
+def _fmt_duration(sec: float) -> str:
+    if sec <= 0:
+        return "—"
+    if sec < 60:
+        return f"{sec:.1f} s"
+    m, s = divmod(int(round(sec)), 60)
+    if m < 60:
+        return f"{m}m {s:02d}s"
+    h, m = divmod(m, 60)
+    return f"{h}h {m:02d}m"
 
 estimated_posts = len(ss.articles) * len(platforms_chosen) * variants
 ready_checks = {
@@ -2053,6 +2079,7 @@ with tab_input:
             except Exception as e:
                 return idx, None, [], e
 
+        t_run_start = time.time()
         try:
             if use_concurrent:
                 with ThreadPoolExecutor(max_workers=max_workers) as pool:
@@ -2076,6 +2103,9 @@ with tab_input:
             progress.empty()
             st.exception(fatal)
             st.stop()
+        run_elapsed = time.time() - t_run_start
+        ss.last_run_elapsed_sec = run_elapsed
+        ss.total_elapsed_sec = float(ss.total_elapsed_sec) + run_elapsed
 
         # 写回 session state
         for idx, (ex, posts) in results.items():
@@ -2235,6 +2265,9 @@ with tab_logs:
     c1.metric("累计输入 tokens", ss.total_tokens_in)
     c2.metric("累计输出 tokens", ss.total_tokens_out)
     c3.metric("已处理文章数", sum(1 for a in ss.articles if "posts" in a))
+    c4, c5 = st.columns(2)
+    c4.metric("最近一轮用时", _fmt_duration(ss.last_run_elapsed_sec))
+    c5.metric("累计用时", _fmt_duration(ss.total_elapsed_sec))
     st.info(f"当前提供商：**{provider}** ｜ 模型：`{model}` ｜ API：`{api_url}`")
     if st.button("🗑 清空所有结果（不删队列）", use_container_width=True):
         # 切换模型后旧 Post 仍残留在 session_state，这个按钮把它们全部清掉
@@ -2243,5 +2276,7 @@ with tab_logs:
             a.pop("posts", None)
         ss.total_tokens_in = 0
         ss.total_tokens_out = 0
+        ss.last_run_elapsed_sec = 0.0
+        ss.total_elapsed_sec = 0.0
         st.success("已清空所有处理结果，下次点「开始处理」会全部重新生成")
         st.rerun()
