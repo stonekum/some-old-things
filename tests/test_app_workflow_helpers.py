@@ -61,6 +61,95 @@ def test_posts_from_article_state_use_edited_body():
     assert post.body == "Original body"
 
 
+def test_rewrite_presets_have_stable_actions():
+    app_mod = _load_app_module()
+
+    assert list(app_mod.REWRITE_PRESETS) == ["shorter", "natural", "platform_fit", "less_ai"]
+    assert app_mod.REWRITE_PRESETS["shorter"].label == "更短一点"
+    assert app_mod.REWRITE_PRESETS["natural"].label == "更自然"
+    assert app_mod.REWRITE_PRESETS["platform_fit"].label == "更适合平台"
+    assert app_mod.REWRITE_PRESETS["less_ai"].label == "降低 AI 味"
+
+
+def test_available_rewrite_presets_adds_quality_only_when_issues_exist():
+    app_mod = _load_app_module()
+    post = app_mod.Post(
+        article_slug="article",
+        platform="instagram",
+        variant=1,
+        title="Title",
+        body="Body",
+        model="deepseek-chat",
+        generated_at=datetime(2026, 1, 1),
+    )
+
+    assert "quality_feedback" not in [key for key, _label in app_mod._available_rewrite_presets(post)]
+
+    post.quality_issues = [
+        {
+            "category": "style_fit",
+            "severity": "medium",
+            "message": "Too generic",
+            "suggestion": "Use concrete nouns",
+        }
+    ]
+
+    assert [key for key, _label in app_mod._available_rewrite_presets(post)][-1] == "quality_feedback"
+
+
+def test_rewrite_post_body_uses_current_edited_body(monkeypatch):
+    app_mod = _load_app_module()
+    captured = {}
+
+    def fake_llm_call_validated(cfg, schema, **kwargs):
+        captured["user"] = kwargs["user"]
+        captured["temperature"] = kwargs["temperature"]
+        return (
+            app_mod._PostJSON(title="Rewritten title", body="Human edited body, tightened."),
+            app_mod.LLMResponse(content="{}", prompt_tokens=7, completion_tokens=11, served_model="served"),
+        )
+
+    monkeypatch.setattr(app_mod, "llm_call_validated", fake_llm_call_validated)
+
+    post = app_mod.Post(
+        article_slug="article",
+        platform="instagram",
+        variant=1,
+        title="Original title",
+        body="Original body that should not be rewritten",
+        model="deepseek-chat",
+        generated_at=datetime(2026, 1, 1),
+        prompt_tokens=2,
+        completion_tokens=3,
+    )
+    extract = app_mod.Extract(
+        title_zh="校园故事",
+        title_en="Campus Story",
+        key_sentences_zh=["学生参加活动。"],
+        key_sentences_en=["Students joined the event."],
+    )
+
+    rewritten = app_mod.rewrite_post_body(
+        app_mod.LLMConfig(api_key="test"),
+        "deepseek-chat",
+        extract,
+        post,
+        current_body="Human edited body",
+        preset="shorter",
+        temperature=0.6,
+        no_cache=True,
+    )
+
+    assert "Current draft body:\nHuman edited body" in captured["user"]
+    assert "Original body that should not be rewritten" not in captured["user"]
+    assert captured["temperature"] == 0.6
+    assert rewritten.title == "Rewritten title"
+    assert rewritten.body == "Human edited body, tightened"
+    assert rewritten.prompt_tokens == 9
+    assert rewritten.completion_tokens == 14
+    assert post.body == "Original body that should not be rewritten"
+
+
 def test_app_extract_accepts_xiaohongshu_platform_aliases():
     app_mod = _load_app_module()
 

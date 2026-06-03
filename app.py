@@ -410,6 +410,43 @@ Body:
 
 Return JSON: {{"title": "...", "body": "..."}}."""
 
+
+REWRITE_SYSTEM = """\
+You are a senior bilingual social media editor for a university communications team.
+Rewrite only the provided draft. Stay strictly faithful to the article facts and
+platform norms. Output ONLY a JSON object: {"title": "...", "body": "..."}."""
+
+REWRITE_USER = """\
+Rewrite this {platform} post using the requested edit.
+
+Requested edit:
+{rewrite_instruction}
+
+Non-negotiable rules:
+1. Use the current draft body below as the draft to revise.
+2. Do not add names, programs, awards, partnerships, numbers, dates, places, or claims absent from the article facts.
+3. Preserve the intended platform format and reader expectations.
+4. Keep the university voice concrete, warm, and restrained.
+5. Plain text only.
+6. PUNCTUATION: Do NOT end any sentence, paragraph, or list item with a period (.) or 「。」.
+   Drop the trailing terminator; do NOT substitute another mark.
+
+Platform norms for {platform}:
+{platform_norms}
+
+Article facts:
+{article_facts}
+
+Quality feedback, if relevant:
+{quality_feedback}
+
+Current draft title: {title}
+
+Current draft body:
+{body}
+
+Return JSON: {{"title": "...", "body": "..."}}."""
+
 DEFAULT_API_URL  = "https://api.deepseek.com/v1/chat/completions"
 SJTU_API_URL     = "https://models.sjtu.edu.cn/api/v1/chat/completions"
 PROMPT_VERSION   = "v1"
@@ -471,6 +508,37 @@ PLATFORM_LABELS = {
     "wechat": "微信公众号",
     "xiaohongshu": "小红书笔记",
 }
+
+
+@dataclass(frozen=True)
+class RewritePreset:
+    label: str
+    instruction: str
+
+
+REWRITE_PRESETS: dict[str, RewritePreset] = {
+    "shorter": RewritePreset(
+        label="更短一点",
+        instruction="Make the draft tighter and shorter while preserving every important source fact and platform requirement.",
+    ),
+    "natural": RewritePreset(
+        label="更自然",
+        instruction="Make the wording sound more natural and human, with smoother rhythm and less stiff phrasing.",
+    ),
+    "platform_fit": RewritePreset(
+        label="更适合平台",
+        instruction="Improve the draft's fit for the target platform norms, including length, structure, CTA, hashtags, and tone.",
+    ),
+    "less_ai": RewritePreset(
+        label="降低 AI 味",
+        instruction="Remove generic AI-sounding phrases, empty hype, and template-like transitions; replace them with concrete nouns and verbs from the source facts.",
+    ),
+}
+
+QUALITY_FEEDBACK_PRESET = RewritePreset(
+    label="按质量反馈修订",
+    instruction="Address the listed quality feedback directly while preserving the draft's useful parts and all source facts.",
+)
 
 # 示例文章：供首次使用者快速试跑，免去自备素材的门槛
 SAMPLE_ARTICLE = {
@@ -1062,6 +1130,83 @@ def revise_post(
     post.prompt_tokens += resp.prompt_tokens
     post.completion_tokens += resp.completion_tokens
     return _post_with_quality(post, review)
+
+
+def _available_rewrite_presets(post: Post) -> list[tuple[str, str]]:
+    presets = [(key, preset.label) for key, preset in REWRITE_PRESETS.items()]
+    if post.quality_issues:
+        presets.append(("quality_feedback", QUALITY_FEEDBACK_PRESET.label))
+    return presets
+
+
+def _rewrite_quality_feedback_text(quality_issues: list[dict[str, Any]] | None) -> str:
+    if not quality_issues:
+        return "No quality feedback provided."
+    lines: list[str] = []
+    for issue in quality_issues:
+        severity = issue.get("severity", "medium")
+        category = issue.get("category", "other")
+        message = issue.get("message", "")
+        suggestion = issue.get("suggestion", "")
+        line = f"- [{severity}] {category}: {message}"
+        if suggestion:
+            line += f" Suggestion: {suggestion}"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _rewrite_instruction_for(preset: str, quality_issues: list[dict[str, Any]] | None) -> str:
+    if preset == "quality_feedback":
+        if not quality_issues:
+            raise ValueError("quality_feedback preset requires quality issues")
+        return QUALITY_FEEDBACK_PRESET.instruction
+    if preset not in REWRITE_PRESETS:
+        raise ValueError(f"unknown rewrite preset: {preset}")
+    return REWRITE_PRESETS[preset].instruction
+
+
+def rewrite_post_body(
+    cfg: LLMConfig,
+    model: str,
+    ex: Extract,
+    post: Post,
+    *,
+    current_body: str,
+    preset: str,
+    quality_issues: list[dict[str, Any]] | None = None,
+    temperature: float = 0.5,
+    no_cache: bool = False,
+) -> Post:
+    """Rewrite the current edited body for one post without mutating the original post."""
+    rewrite_instruction = _rewrite_instruction_for(preset, quality_issues)
+    user = (
+        REWRITE_USER.replace("{platform}", post.platform)
+        .replace("{platform_norms}", PLATFORM_NORMS_FOR_REVIEW.get(post.platform, "(no norms registered)"))
+        .replace("{article_facts}", _quality_facts(ex))
+        .replace("{quality_feedback}", _rewrite_quality_feedback_text(quality_issues))
+        .replace("{rewrite_instruction}", rewrite_instruction)
+        .replace("{title}", post.title)
+        .replace("{body}", current_body)
+    )
+    payload, resp = llm_call_validated(
+        cfg,
+        _PostJSON,
+        system=REWRITE_SYSTEM,
+        user=user,
+        model=model,
+        temperature=temperature,
+        no_cache=no_cache,
+    )
+    rewritten = post.model_copy(deep=True)
+    rewritten.title = payload.title
+    rewritten.body = _strip_trailing_periods(payload.body)
+    rewritten.prompt_tokens += resp.prompt_tokens
+    rewritten.completion_tokens += resp.completion_tokens
+    rewritten.served_model = resp.served_model or rewritten.served_model
+    rewritten.api_url = cfg.api_url
+    rewritten.from_cache = resp.cached
+    rewritten.reasoning_content = resp.reasoning_content
+    return rewritten
 
 
 def _record_quality_error(error_sink: list[str] | None, message: str) -> None:
@@ -2172,6 +2317,40 @@ with tab_results:
                         with t:
                             st.markdown(f"### {post.title}")
                             body_key = _post_body_key(art["name"], post)
+                            rewrite_msg_key = f"_rewrite_msg_{body_key}"
+                            rewrite_error_key = f"_rewrite_error_{body_key}"
+                            rewrite_request = st.session_state.get("_rewrite_request")
+                            if isinstance(rewrite_request, dict) and rewrite_request.get("body_key") == body_key:
+                                preset_key = str(rewrite_request.get("preset", ""))
+                                preset_label = str(rewrite_request.get("label", preset_key))
+                                current_body_for_rewrite = str(
+                                    rewrite_request.get("current_body", st.session_state.get(body_key, post.body))
+                                )
+                                try:
+                                    with st.spinner(f"正在改写：{preset_label}…"):
+                                        rewritten_post = rewrite_post_body(
+                                            LLMConfig(api_key=api_key, api_url=api_url, thinking=thinking_setting),
+                                            model,
+                                            ex,
+                                            post,
+                                            current_body=current_body_for_rewrite,
+                                            preset=preset_key,
+                                            quality_issues=post.quality_issues,
+                                            temperature=temperature,
+                                            no_cache=not use_cache,
+                                        )
+                                    st.session_state[body_key] = rewritten_post.body
+                                    st.session_state[rewrite_msg_key] = f"已改写：{preset_label}"
+                                except Exception as e:
+                                    st.session_state[rewrite_error_key] = f"{type(e).__name__}: {e}"
+                                finally:
+                                    st.session_state.pop("_rewrite_request", None)
+
+                            if rewrite_msg_key in st.session_state:
+                                st.success(st.session_state.pop(rewrite_msg_key))
+                            if rewrite_error_key in st.session_state:
+                                st.error(f"改写失败，已保留原文：`{st.session_state.pop(rewrite_error_key)}`")
+
                             edited_body = st.text_area(
                                 "正文",
                                 value=post.body,
@@ -2179,6 +2358,24 @@ with tab_results:
                                 key=body_key,
                             )
                             edited_post = _post_with_body(post, edited_body)
+                            rewrite_options = _available_rewrite_presets(post)
+                            st.caption("局部改写")
+                            rewrite_cols = st.columns(len(rewrite_options))
+                            for rewrite_col, (preset_key, preset_label) in zip(rewrite_cols, rewrite_options):
+                                with rewrite_col:
+                                    if st.button(
+                                        preset_label,
+                                        key=f"rewrite_{art['name']}_{post.platform}_{post.variant}_{preset_key}",
+                                        disabled=not api_key,
+                                        use_container_width=True,
+                                    ):
+                                        st.session_state["_rewrite_request"] = {
+                                            "body_key": body_key,
+                                            "preset": preset_key,
+                                            "label": preset_label,
+                                            "current_body": edited_body,
+                                        }
+                                        st.rerun()
                             cdl_md, cdl_docx, cmeta = st.columns([1, 1, 3])
                             with cdl_md:
                                 st.download_button(
